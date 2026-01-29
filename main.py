@@ -672,6 +672,9 @@ class ReminderPlugin(Star):
                 # 这里暂不删除，以免发送未完成文件被删
             else:
                 logger.warning(f"TTS生成失败或文件不存在。Provider: {type(tts_provider).__name__}")
+                
+        except Exception as e:
+            logger.error(f"TTS语音播报执行异常: {e}")
 
     # ==================== 时间解析 ====================
     
