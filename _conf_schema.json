@@ -1,0 +1,130 @@
+{
+  "llm_provider": {
+    "description": "LLM提供商",
+    "type": "string",
+    "hint": "选择用于处理日程请求的LLM提供商，留空则使用当前会话的默认提供商",
+    "_special": "select_provider"
+  },
+  "schedule_detection_llm": {
+    "description": "日程检测专用LLM提供商",
+    "type": "string",
+    "hint": "选择用于判断是否为日程设定请求的LLM提供商（可选，留空则使用主LLM）",
+    "_special": "select_provider"
+  },
+  "tts_provider": {
+    "description": "TTS语音合成提供商",
+    "type": "string",
+    "hint": "选择用于语音播报的TTS提供商（可选，留空则不启用语音播报）",
+    "_special": "select_provider_tts"
+  },
+  "enable_llm_monitor": {
+    "description": "启用LLM监控模式",
+    "type": "bool",
+    "hint": "启用后会自动监控用户消息，判断是否需要创建日程",
+    "default": true
+  },
+  "enable_tts": {
+    "description": "启用TTS语音播报",
+    "type": "bool",
+    "hint": "是否在提醒时使用语音播报",
+    "default": false
+  },
+  "enable_web_search": {
+    "description": "启用网络搜索",
+    "type": "bool",
+    "hint": "是否允许在创建日程时搜索网络获取相关信息",
+    "default": false
+  },
+  "enable_personality": {
+    "description": "启用人格化回复",
+    "type": "bool",
+    "hint": "是否使用人格设定来生成更自然的回复",
+    "default": true
+  },
+  "max_reminders": {
+    "description": "最大提醒数量",
+    "type": "int",
+    "hint": "每个用户同时最多可以设置的提醒数量",
+    "default": 20
+  },
+  "quick_time_presets": {
+    "description": "快捷时间预设",
+    "type": "object",
+    "hint": "设置各种快捷时间的具体分钟数",
+    "items": {
+      "wait_a_moment": {
+        "description": "\"等一下\"对应的分钟数",
+        "type": "int",
+        "hint": "用户说\"等一下\"、\"一会儿\"时默认等待的分钟数",
+        "default": 5
+      },
+      "short_while": {
+        "description": "\"稍后\"对应的分钟数",
+        "type": "int",
+        "hint": "用户说\"稍后\"、\"过会儿\"时默认等待的分钟数",
+        "default": 10
+      },
+      "half_hour": {
+        "description": "\"半小时后\"对应的分钟数",
+        "type": "int",
+        "hint": "用户说\"半小时后\"时默认等待的分钟数",
+        "default": 30
+      }
+    }
+  },
+  "default_time_points": {
+    "description": "默认时间点设置",
+    "type": "object",
+    "hint": "设置各时段的默认时间点（24小时制）",
+    "items": {
+      "morning": {
+        "description": "早上默认时间",
+        "type": "string",
+        "hint": "用户说\"明天早上\"时的默认时间，格式：HH:MM",
+        "default": "08:00"
+      },
+      "noon": {
+        "description": "中午默认时间",
+        "type": "string",
+        "hint": "用户说\"明天中午\"时的默认时间，格式：HH:MM",
+        "default": "12:00"
+      },
+      "afternoon": {
+        "description": "下午默认时间",
+        "type": "string",
+        "hint": "用户说\"明天下午\"时的默认时间，格式：HH:MM",
+        "default": "14:00"
+      },
+      "evening": {
+        "description": "晚上默认时间",
+        "type": "string",
+        "hint": "用户说\"明天晚上\"时的默认时间，格式：HH:MM",
+        "default": "19:00"
+      },
+      "night": {
+        "description": "深夜默认时间",
+        "type": "string",
+        "hint": "用户说\"明天夜里\"时的默认时间，格式：HH:MM",
+        "default": "22:00"
+      },
+      "default_weekday": {
+        "description": "星期几的默认时间",
+        "type": "string",
+        "hint": "用户只说\"星期X\"时的默认时间，格式：HH:MM",
+        "default": "09:00"
+      }
+    }
+  },
+  "trigger_keywords": {
+    "description": "触发关键词",
+    "type": "list",
+    "hint": "当消息包含这些关键词时，直接判定为日程设定请求（不需要LLM判断）",
+    "default": ["提醒我", "设置提醒", "定时提醒", "日程提醒", "记得提醒", "别忘了提醒"]
+  },
+  "data_persistence": {
+    "description": "数据持久化",
+    "type": "bool",
+    "hint": "是否将日程数据持久化存储（重启后保留）",
+    "default": true
+  }
+}
