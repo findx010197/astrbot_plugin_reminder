@@ -217,7 +217,7 @@ class ReminderPlugin(Star):
             logger.debug(
                 f"消息链结构: {[type(c).__name__ for c in event.message_obj.message]}"
             )
-        except:
+        except Exception:
             pass
 
         # 1. 优先从 At 组件中获取
