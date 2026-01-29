@@ -189,19 +189,54 @@ class ReminderPlugin(Star):
         
         event.stop_event()
 
+    def _clean_llm_response(self, text: str) -> str:
+        """清洗LLM返回的文本，去除思考过程和废话"""
+        if not text:
+            return ""
+        
+        # 1. 去除 <think>...</think> 标签及其内容
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        
+        # 2. 去除 Markdown 代码块标记（如果有）
+        text = re.sub(r'^```.*?\n', '', text)
+        text = re.sub(r'\n```$', '', text)
+        
+        # 3. 去除常见的废话前缀
+        prefixes = ["好的，", "没问题，", "根据您的设定，", "生成的消息如下：", "确认消息："]
+        for prefix in prefixes:
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+        
+        return text.strip()
+
     def _get_at_target(self, event: AstrMessageEvent) -> tuple[Optional[str], Optional[str]]:
         """从消息中获取第一个被@的用户ID和名称"""
+        # 调试日志：打印消息链结构
+        try:
+            logger.debug(f"消息链结构: {[type(c).__name__ for c in event.message_obj.message]}")
+        except:
+            pass
+
+        # 1. 优先从 At 组件中获取
         for component in event.message_obj.message:
             if isinstance(component, Comp.At):
-                # 排除@机器人的情况（如果机器人ID已知，这里简单判断是否为self_id，但通常event里不容易直接获取self_id，
-                # 且@机器人通常是为了触发指令。这里暂取第一个At对象，实际逻辑可能需要根据平台调整）
-                # 这里的 qq 属性在不同平台可能字段名不同，Comp.At 标准字段通常是 qq 或 id
                 target_id = str(getattr(component, 'qq', getattr(component, 'id', '')))
                 if target_id:
-                    # 尝试获取名称，如果组件中没有，可能需要额外API，这里暂时用ID或"用户"代替
-                    # 在实际场景中，event.message_obj.message 中的 At 组件可能不包含 name
-                    # 简单起见，返回 ID 和 "TA"
                     return target_id, "TA"
+        
+        # 2. 如果没有 At 组件，尝试从文本中正则匹配 @xxx
+        # 这里的匹配比较简单，实际ID可能无法从文本直接获取（取决于平台）
+        # 如果是纯文本环境，可能需要用户输入ID，或者只能做到形式上的@
+        text = event.message_str
+        match = re.search(r'@(\S+)', text)
+        if match:
+            # 注意：从文本只能提取到名字，无法获取真实ID
+            # 这种情况下，target_id 可能只能设为 sender_id (提醒自己)，或者设为特殊值
+            # 为了避免逻辑错误，这里仅记录名字，ID 暂时留空或设为 sender_id
+            name = match.group(1)
+            logger.info(f"从文本中匹配到 @{name}，但无法获取真实ID")
+            return None, name # 返回 None ID 表示无法从系统层面 @
+            
         return None, None
 
     async def _is_schedule_trigger(self, message: str, event: AstrMessageEvent) -> bool:
@@ -579,6 +614,9 @@ class ReminderPlugin(Star):
                 logger.warning(f"未找到TTS提供商: {tts_provider_id}")
                 return
             
+            # 调试：打印 Provider 的属性，方便排查接口名
+            logger.debug(f"TTS Provider {type(tts_provider).__name__} methods: {dir(tts_provider)}")
+
             # 生成语音
             # 尝试调用不同的 TTS 接口以兼容不同的 Provider
             audio_data = None
@@ -586,8 +624,10 @@ class ReminderPlugin(Star):
                 audio_data = await tts_provider.generate_voice(message)
             elif hasattr(tts_provider, 'text_to_speech'):
                 audio_data = await tts_provider.text_to_speech(message)
+            elif hasattr(tts_provider, 'generate'): # 增加 generate 方法尝试
+                audio_data = await tts_provider.generate(message)
             else:
-                logger.error(f"TTS Provider {type(tts_provider).__name__} 没有找到支持的语音生成方法 (generate_voice 或 text_to_speech)")
+                logger.error(f"TTS Provider {type(tts_provider).__name__} 没有找到支持的语音生成方法 (generate_voice, text_to_speech, generate)")
                 return
 
             if audio_data:
@@ -737,13 +777,14 @@ class ReminderPlugin(Star):
 1. 必须体现你的人格特色（口癖、语气、态度等）。
 2. 明确告知用户你已经记下了，会准时提醒。
 3. 不要太长，一两句话即可。
-4. 不要输出任何非回复内容（如“好的”、“根据设定...”等）。
+4. 绝对不要输出任何思考过程（如<think>标签）或非回复内容（如“好的”）。
 
 请直接生成回复内容："""
 
         try:
             response = await provider.text_chat(prompt=prompt)
-            return response.completion_text.strip()
+            raw_text = response.completion_text.strip()
+            return self._clean_llm_response(raw_text)
         except Exception as e:
             logger.error(f"生成确认回复失败: {e}")
             return f"✅ 好的，我会在{time_str}提醒您：{event_content}"
@@ -784,11 +825,13 @@ class ReminderPlugin(Star):
 2. 清楚说明要提醒的事项。
 3. 语气自然、友好，符合人设。
 4. 可以适当添加emoji。
+5. 绝对不要输出任何思考过程（如<think>标签）或非回复内容。
 """
 
         try:
             response = await provider.text_chat(prompt=prompt)
-            return response.completion_text.strip()
+            raw_text = response.completion_text.strip()
+            return self._clean_llm_response(raw_text)
         except Exception as e:
             logger.error(f"生成提醒消息失败: {e}")
             return f"⏰ 提醒：{schedule.event_content}"
