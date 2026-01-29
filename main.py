@@ -62,8 +62,10 @@ class ReminderPlugin(Star):
         # 存储日程信息
         self.schedules: Dict[str, ScheduleItem] = {}
         
-        # 数据存储路径 (get_astrbot_data_path() 返回 str，需要用 os.path.join 拼接)
-        self.data_dir = os.path.join(get_astrbot_data_path(), "plugin_data", "astrbot_plugin_reminder")
+        # 数据存储路径
+        # 强制转换为 str 以兼容不同版本的 AstrBot 和防止路径拼接错误
+        base_path = str(get_astrbot_data_path())
+        self.data_dir = os.path.join(base_path, "plugin_data", "astrbot_plugin_reminder")
         self.data_file = os.path.join(self.data_dir, "schedules.json")
         
         logger.info(f"日程提醒插件配置加载完成: {self.config}")
