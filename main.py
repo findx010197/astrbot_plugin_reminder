@@ -151,8 +151,21 @@ class ReminderPlugin(Star):
 
         # 防止与指令冲突：如果消息以指令前缀开头，则忽略
         # 这里列出插件注册的指令和常见的指令前缀
-        cmd_prefixes = ["/callme", "/提醒我", "/remind", "callme", "提醒我", "remind"]
-        if any(message_str.lower().startswith(prefix) for prefix in cmd_prefixes):
+        # 注意：这里不仅要匹配 /callme，还要匹配 callme（因为有些平台不需要前缀）
+        # 还要匹配别名
+        cmd_prefixes = [
+            "/callme", "callme", 
+            "/提醒我", "提醒我", 
+            "/remind", "remind",
+            "／callme", "／提醒我" # 全角符号兼容
+        ]
+        
+        lower_msg = message_str.lower()
+        if any(lower_msg.startswith(prefix) for prefix in cmd_prefixes):
+            return
+        
+        # 额外检查：如果消息完全等于 "list" 或 "cancel"，也忽略（可能是后续交互）
+        if lower_msg in ["list", "cancel", "help"]:
             return
         
         # 第一步：判断是否触发日程设定
@@ -196,6 +209,8 @@ class ReminderPlugin(Star):
         
         # 1. 去除 <think>...</think> 标签及其内容
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        # 去除 [Thinking] 等变体
+        text = re.sub(r'\[.*?\]', '', text, flags=re.DOTALL) 
         
         # 2. 去除 Markdown 代码块标记（如果有）
         text = re.sub(r'^```.*?\n', '', text)
