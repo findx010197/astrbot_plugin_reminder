@@ -944,13 +944,13 @@ class ReminderPlugin(Star):
 
     def _get_user_display_name(self, user_id: str, default_name: str) -> str:
         """获取用户显示名称（优先使用配置的别名）"""
-        user_alias_str = self.config.get("user_alias", "{}")
-        try:
-            user_alias = json.loads(user_alias_str) if isinstance(user_alias_str, str) else user_alias_str
-        except json.JSONDecodeError:
-            user_alias = {}
-        if user_id in user_alias:
-            return user_alias[user_id]
+        # 配置格式为列表，每项格式为 "用户ID:称呼"
+        user_alias_list = self.config.get("user_alias", [])
+        for item in user_alias_list:
+            if ":" in item:
+                uid, alias = item.split(":", 1)
+                if uid.strip() == str(user_id):
+                    return alias.strip()
         return default_name
 
     async def _generate_reminder_message(self, schedule: ScheduleItem) -> str:

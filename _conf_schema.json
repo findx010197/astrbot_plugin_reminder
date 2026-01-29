@@ -128,9 +128,9 @@
     "default": true
   },
   "user_alias": {
-    "description": "用户称呼映射（JSON格式）",
-    "type": "string",
-    "hint": "配置用户ID到称呼的映射，JSON格式，如：{\"123456\": \"老板\", \"789012\": \"小王\"}",
-    "default": "{}"
+    "description": "用户称呼映射",
+    "type": "list",
+    "hint": "配置用户ID到称呼的映射，格式为「用户ID:称呼」，如：123456:老板",
+    "default": []
   }
 }
