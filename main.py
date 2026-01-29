@@ -944,7 +944,11 @@ class ReminderPlugin(Star):
 
     def _get_user_display_name(self, user_id: str, default_name: str) -> str:
         """获取用户显示名称（优先使用配置的别名）"""
-        user_alias = self.config.get("user_alias", {})
+        user_alias_str = self.config.get("user_alias", "{}")
+        try:
+            user_alias = json.loads(user_alias_str) if isinstance(user_alias_str, str) else user_alias_str
+        except json.JSONDecodeError:
+            user_alias = {}
         if user_id in user_alias:
             return user_alias[user_id]
         return default_name
