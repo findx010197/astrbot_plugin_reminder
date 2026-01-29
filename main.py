@@ -226,7 +226,7 @@ class ReminderPlugin(Star):
         """判断消息是否为日程设定请求"""
         # 关键词快速匹配
         trigger_keywords = self.config.get("trigger_keywords", 
-            ["提醒我", "设置提醒", "定时提醒", "日程提醒", "记得提醒", "别忘了提醒"])
+            ["提醒我", "设置提醒", "定时提醒", "日程提醒", "记得提醒", "别忘了提醒", "callme", "喊我", "叫我"])
         
         if any(keyword in message for keyword in trigger_keywords):
             logger.info(f"通过关键词匹配触发日程设定: {message}")
@@ -237,13 +237,27 @@ class ReminderPlugin(Star):
         if not provider:
             return False
         
-        prompt = f"""请判断以下用户消息是否是日程设定或提醒请求：
+        prompt = f"""请判断以下用户消息是否是**日程设定**或**提醒请求**：
+
 用户消息："{message}"
 
-判断标准：
-1. 用户明确表达想要被提醒某件事
-2. 消息中包含时间相关的描述（如：明天、下午3点、10分钟后等）
-3. 消息中包含要做的事情或要被提醒的内容
+【判断标准】
+1. **必须包含明确的提醒意图**：用户希望在未来某个时间点被告知某事。
+2. **必须包含时间描述**：如“明天”、“下午3点”、“10分钟后”等。
+3. **必须包含事件内容**：要做的事情或被提醒的内容。
+
+【负面案例 - 请回复“否”】
+- “明天再说吧” (推脱/闲聊，无提醒意图)
+- “明天上号” (陈述计划，未要求提醒)
+- “下午去吃饭” (陈述事实)
+- “明天天气怎么样” (询问信息)
+- “我不确定明天有没有空” (不确定陈述)
+
+【正面案例 - 请回复“是”】
+- “明天早上叫我起床”
+- “下午3点提醒我开会”
+- “10分钟后喊我”
+- “记得下周一提醒我交报告”
 
 如果是日程/提醒请求，回复"是"，否则回复"否"。
 只需回复"是"或"否"，不要包含其他内容。"""
@@ -752,21 +766,30 @@ class ReminderPlugin(Star):
         current_time = datetime.now()
         time_presets = self.config.get("default_time_points", {})
         
-        prompt = f"""请将以下时间描述转换为具体的日期时间。
+        prompt = f"""请将以下时间描述转换为具体的日期时间（YYYY-MM-DD HH:MM:SS）。
 
 时间描述："{time_str}"
-当前时间：{current_time.strftime("%Y年%m月%d日 %H:%M:%S")} 星期{['一','二','三','四','五','六','日'][current_time.weekday()]}
+当前时间：{current_time.strftime("%Y-%m-%d %H:%M:%S")} 星期{['一','二','三','四','五','六','日'][current_time.weekday()]}
 
-默认时间设置：
-- 早上：{time_presets.get("morning", "08:00")}
-- 中午：{time_presets.get("noon", "12:00")}
-- 下午：{time_presets.get("afternoon", "14:00")}
-- 晚上：{time_presets.get("evening", "19:00")}
-- 深夜：{time_presets.get("night", "22:00")}
-- 星期X默认时间：{time_presets.get("default_weekday", "09:00")}
+【推断规则】
+1. **模糊时刻（如“3点”、“十点”）**：
+   - 优先理解为**未来最近**的那个时刻。
+   - 如果当前是上午且该时刻在当前之后，视为上午的时刻（如9点说“10点”->今日10:00）。
+   - 如果当前是下午且该时刻在当前之后，视为下午的时刻（如14点说“4点”->今日16:00）。
+   - 如果该时刻在今日已过去，视为晚上的时刻（如11点说“10点”->今日22:00）或明天的时刻。
+   
+2. **模糊日期（如“星期五”、“15号”）**：
+   - 优先理解为**本周**或**本月**尚未发生的日期。
+   - 只有当本周/本月该日期已过去时，才顺延至下周/下月。
 
-请直接返回目标时间，格式为：YYYY-MM-DD HH:MM:SS
-只返回时间，不要包含其他内容。如果无法解析，返回"无法解析"。"""
+3. **默认时间点**（如果只说了日期没说具体几点）：
+   - 早上/上午：{time_presets.get("morning", "08:00")}
+   - 中午：{time_presets.get("noon", "12:00")}
+   - 下午：{time_presets.get("afternoon", "14:00")}
+   - 晚上：{time_presets.get("evening", "19:00")}
+   - 没说时段：{time_presets.get("default_weekday", "09:00")}
+
+请直接返回格式化的时间字符串（YYYY-MM-DD HH:MM:SS），不要包含其他内容。如果无法解析，返回"无法解析"。"""
 
         try:
             response = await provider.text_chat(prompt=prompt)
