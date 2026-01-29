@@ -618,44 +618,60 @@ class ReminderPlugin(Star):
             logger.debug(f"TTS Provider {type(tts_provider).__name__} methods: {dir(tts_provider)}")
 
             # 生成语音
-            # 尝试调用不同的 TTS 接口以兼容不同的 Provider
-            audio_data = None
-            if hasattr(tts_provider, 'generate_voice'):
-                audio_data = await tts_provider.generate_voice(message)
-            elif hasattr(tts_provider, 'text_to_speech'):
-                audio_data = await tts_provider.text_to_speech(message)
-            elif hasattr(tts_provider, 'generate'): # 增加 generate 方法尝试
-                audio_data = await tts_provider.generate(message)
-            else:
-                logger.error(f"TTS Provider {type(tts_provider).__name__} 没有找到支持的语音生成方法 (generate_voice, text_to_speech, generate)")
-                return
+            # AstrBot TTS Provider 标准接口为 get_audio(text)，返回音频文件路径
+            audio_path = None
+            if hasattr(tts_provider, 'get_audio'):
+                try:
+                    audio_path = await tts_provider.get_audio(message)
+                except Exception as e:
+                    logger.error(f"调用 TTS Provider.get_audio 失败: {e}")
+                    return
+            # 兼容性尝试：某些旧插件可能使用其他名称
+            elif hasattr(tts_provider, 'generate_voice'):
+                # ... (保留旧逻辑作为 fallback，但主要依赖 get_audio)
+                try:
+                    ret = await tts_provider.generate_voice(message)
+                    if ret:
+                        # 如果返回二进制数据，需要手动保存
+                        if isinstance(ret, bytes):
+                            temp_path = self.data_dir / f"tts_{schedule.id}_{int(time.time())}.wav"
+                            with open(temp_path, 'wb') as f:
+                                f.write(ret)
+                            audio_path = str(temp_path)
+                        # 如果返回对象
+                        elif hasattr(ret, 'audio_content'):
+                            temp_path = self.data_dir / f"tts_{schedule.id}_{int(time.time())}.wav"
+                            with open(temp_path, 'wb') as f:
+                                f.write(ret.audio_content)
+                            audio_path = str(temp_path)
+                except Exception:
+                    pass
+            
+            if not audio_path:
+                 # 再次尝试 text_to_speech
+                if hasattr(tts_provider, 'text_to_speech'):
+                    try:
+                        audio_data = await tts_provider.text_to_speech(message)
+                         # ... (同上，二进制保存逻辑)
+                        if isinstance(audio_data, bytes):
+                            temp_path = self.data_dir / f"tts_{schedule.id}_{int(time.time())}.wav"
+                            with open(temp_path, 'wb') as f:
+                                f.write(audio_data)
+                            audio_path = str(temp_path)
+                    except Exception:
+                        pass
 
-            if audio_data:
-                # 如果返回的是对象（如 Result），尝试获取音频数据
-                if hasattr(audio_data, 'audio_content'): # 某些 API 可能返回对象
-                    audio_data = audio_data.audio_content
-                elif hasattr(audio_data, 'content'):
-                    audio_data = audio_data.content
-                
-                # 保存语音文件
-                audio_path = os.path.join(self.data_dir, f"tts_{schedule.id}.wav")
-                with open(audio_path, 'wb') as f:
-                    f.write(audio_data)
-                
+            if audio_path and os.path.exists(audio_path):
                 # 发送语音消息
                 chain = [Comp.Record(file=str(audio_path), url=str(audio_path))]
                 message_chain = MessageChain()
                 message_chain.chain = chain
                 await self.context.send_message(schedule.unified_msg_origin, message_chain)
                 
-                # 清理临时文件
-                try:
-                    os.remove(audio_path)
-                except:
-                    pass
-                    
-        except Exception as e:
-            logger.error(f"TTS语音播报失败: {e}")
+                # AstrBot 的 TTS 生成的文件通常在临时目录，插件不应负责清理，或者根据具体实现
+                # 这里暂不删除，以免发送未完成文件被删
+            else:
+                logger.warning(f"TTS生成失败或文件不存在。Provider: {type(tts_provider).__name__}")
 
     # ==================== 时间解析 ====================
     
@@ -753,31 +769,44 @@ class ReminderPlugin(Star):
         """生成日程确认回复"""
         time_str = schedule_info.get("time", "指定时间")
         event_content = schedule_info.get("event", "未知事件")
+        target_name = schedule_info.get("target_name", "您")
+        target_id = schedule_info.get("target_id", "")
+        sender_id = event.get_sender_id()
+        
+        is_self = target_id == sender_id or not target_id
         
         if not self.config.get("enable_personality", True):
-            return f"✅ 好的，我会在{time_str}提醒您：{event_content}"
+            if is_self:
+                return f"✅ 好的，我会在{time_str}提醒您：{event_content}"
+            else:
+                return f"✅ 好的，我会在{time_str}提醒 @{target_name}：{event_content}"
         
         # 获取人格设定
         system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
         
         provider = await self._get_main_provider(event)
         if not provider:
-            return f"✅ 好的，我会在{time_str}提醒您：{event_content}"
+            return f"✅ 好的，我会在{time_str}提醒{'您' if is_self else target_name}：{event_content}"
+        
+        target_desc = "用户自己" if is_self else f"用户 {target_name}"
         
         prompt = f"""用户刚刚设置了一个日程提醒，请你根据你的人格设定，生成一条确认消息。
 
 日程信息：
-- 时间：{time_str}
-- 事件：{event_content}
+- 提醒时间：{time_str}
+- 提醒事件：{event_content}
+- 提醒对象：{target_desc}
 
 当前人格设定：
 {system_prompt if system_prompt else "你是一个贴心的助手"}
 
 要求：
 1. 必须体现你的人格特色（口癖、语气、态度等）。
-2. 明确告知用户你已经记下了，会准时提醒。
-3. 不要太长，一两句话即可。
-4. 绝对不要输出任何思考过程（如<think>标签）或非回复内容（如“好的”）。
+2. 明确告知用户你已经记下了。
+3. 如果是提醒**别人**（提醒对象不是“用户自己”），请在回复中明确说“我会提醒 {target_name}”或“会去叫 {target_name}”，**不要**说“提醒您”。
+4. 如果是提醒**自己**，则说“提醒您”。
+5. 不要太长，一两句话即可。
+6. 绝对不要输出任何思考过程（如<think>标签）或非回复内容。
 
 请直接生成回复内容："""
 
