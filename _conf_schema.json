@@ -128,9 +128,9 @@
     "default": true
   },
   "user_alias": {
-    "description": "用户称呼映射",
+    "description": "用户ID与称呼映射表",
     "type": "list",
-    "hint": "配置用户ID到称呼的映射，格式为「用户ID:称呼」，如：123456:老板",
+    "hint": "每一项格式为：用户ID,称呼。例如：123456789,老板",
     "default": []
   }
 }
