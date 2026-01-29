@@ -62,9 +62,9 @@ class ReminderPlugin(Star):
         # 存储日程信息
         self.schedules: Dict[str, ScheduleItem] = {}
         
-        # 数据存储路径
-        self.data_dir = get_astrbot_data_path() / "plugin_data" / "astrbot_plugin_reminder"
-        self.data_file = self.data_dir / "schedules.json"
+        # 数据存储路径 (get_astrbot_data_path() 返回 str，需要用 os.path.join 拼接)
+        self.data_dir = os.path.join(get_astrbot_data_path(), "plugin_data", "astrbot_plugin_reminder")
+        self.data_file = os.path.join(self.data_dir, "schedules.json")
         
         logger.info(f"日程提醒插件配置加载完成: {self.config}")
 
@@ -98,7 +98,7 @@ class ReminderPlugin(Star):
     async def _load_schedules(self):
         """从文件加载日程数据"""
         try:
-            if self.data_file.exists():
+            if os.path.exists(self.data_file):
                 with open(self.data_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
@@ -529,7 +529,7 @@ class ReminderPlugin(Star):
             
             if audio_data:
                 # 保存语音文件
-                audio_path = self.data_dir / f"tts_{schedule.id}.wav"
+                audio_path = os.path.join(self.data_dir, f"tts_{schedule.id}.wav")
                 with open(audio_path, 'wb') as f:
                     f.write(audio_data)
                 
