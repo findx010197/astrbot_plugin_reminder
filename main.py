@@ -32,7 +32,7 @@ class ScheduleItem:
     """日程数据结构"""
     id: str                          # 唯一ID
     unified_msg_origin: str          # 会话标识
-    sender_id: str                   # 发送者ID
+    sender_id: str                   # 发送者ID（创建者）
     sender_name: str                 # 发送者名称
     event_content: str               # 事件内容
     trigger_time: float              # 触发时间戳
@@ -40,12 +40,19 @@ class ScheduleItem:
     status: str = "pending"          # 状态
     raw_time_str: str = ""           # 原始时间描述
     search_info: str = ""            # 网络搜索获取的信息
+    target_id: str = ""              # 目标用户ID（为空则默认为sender_id）
+    target_name: str = ""            # 目标用户名称
     
     def to_dict(self) -> dict:
         return asdict(self)
     
     @classmethod
     def from_dict(cls, data: dict) -> "ScheduleItem":
+        # 兼容旧数据
+        if "target_id" not in data:
+            data["target_id"] = data.get("sender_id", "")
+        if "target_name" not in data:
+            data["target_name"] = data.get("sender_name", "")
         return cls(**data)
 
 
@@ -164,6 +171,12 @@ class ReminderPlugin(Star):
             event.stop_event()
             return
         
+        # 检查是否有 @ 对象
+        target_id, target_name = self._get_at_target(event)
+        if target_id:
+            schedule_info["target_id"] = target_id
+            schedule_info["target_name"] = target_name
+
         # 第三步：创建日程
         result = await self._create_schedule(event, schedule_info)
         
@@ -175,6 +188,21 @@ class ReminderPlugin(Star):
             yield event.plain_result(result["message"])
         
         event.stop_event()
+
+    def _get_at_target(self, event: AstrMessageEvent) -> tuple[Optional[str], Optional[str]]:
+        """从消息中获取第一个被@的用户ID和名称"""
+        for component in event.message_obj.message:
+            if isinstance(component, Comp.At):
+                # 排除@机器人的情况（如果机器人ID已知，这里简单判断是否为self_id，但通常event里不容易直接获取self_id，
+                # 且@机器人通常是为了触发指令。这里暂取第一个At对象，实际逻辑可能需要根据平台调整）
+                # 这里的 qq 属性在不同平台可能字段名不同，Comp.At 标准字段通常是 qq 或 id
+                target_id = str(getattr(component, 'qq', getattr(component, 'id', '')))
+                if target_id:
+                    # 尝试获取名称，如果组件中没有，可能需要额外API，这里暂时用ID或"用户"代替
+                    # 在实际场景中，event.message_obj.message 中的 At 组件可能不包含 name
+                    # 简单起见，返回 ID 和 "TA"
+                    return target_id, "TA"
+        return None, None
 
     async def _is_schedule_trigger(self, message: str, event: AstrMessageEvent) -> bool:
         """判断消息是否为日程设定请求"""
@@ -368,6 +396,12 @@ class ReminderPlugin(Star):
             yield event.plain_result("抱歉，我无法理解您的提醒请求。\n\n" + self._get_help_text())
             return
         
+        # 检查是否有 @ 对象
+        target_id, target_name = self._get_at_target(event)
+        if target_id:
+            schedule_info["target_id"] = target_id
+            schedule_info["target_name"] = target_name
+
         # 创建日程
         result = await self._create_schedule(event, schedule_info)
         
@@ -405,6 +439,12 @@ class ReminderPlugin(Star):
         """创建日程"""
         sender_id = event.get_sender_id()
         
+        # 获取目标用户（如果是帮别人设置）
+        target_id = schedule_info.get("target_id", sender_id)
+        target_name = schedule_info.get("target_name", event.get_sender_name())
+        if target_id == sender_id: # 如果相等，说明是自己，修正名称
+             target_name = event.get_sender_name()
+
         # 检查数量限制
         max_reminders = self.config.get("max_reminders", 20)
         user_count = sum(1 for s in self.schedules.values() 
@@ -444,7 +484,9 @@ class ReminderPlugin(Star):
             created_at=time.time(),
             status=ReminderStatus.PENDING.value,
             raw_time_str=time_str,
-            search_info=schedule_info.get("search_info", "")
+            search_info=schedule_info.get("search_info", ""),
+            target_id=target_id,
+            target_name=target_name
         )
         
         # 存储日程
@@ -501,7 +543,13 @@ class ReminderPlugin(Star):
             message = await self._generate_reminder_message(schedule)
             
             # 构建消息链
-            chain = [Comp.Plain(message)]
+            chain = []
+            # 如果是提醒他人，且目标ID不是创建者ID，则添加At
+            if schedule.target_id and schedule.target_id != schedule.sender_id:
+                chain.append(Comp.At(qq=schedule.target_id))
+                chain.append(Comp.Plain(" ")) # At后加个空格
+            
+            chain.append(Comp.Plain(message))
             
             # 发送文本消息
             message_chain = MessageChain()
@@ -702,8 +750,13 @@ class ReminderPlugin(Star):
 
     async def _generate_reminder_message(self, schedule: ScheduleItem) -> str:
         """生成提醒消息"""
+        is_self_reminder = schedule.target_id == schedule.sender_id or not schedule.target_id
+        
         if not self.config.get("enable_personality", True):
-            return f"⏰ 提醒：{schedule.sender_name}，您之前设定的提醒时间到了！\n📌 事项：{schedule.event_content}"
+            if is_self_reminder:
+                return f"⏰ 提醒：{schedule.sender_name}，您之前设定的提醒时间到了！\n📌 事项：{schedule.event_content}"
+            else:
+                return f"⏰ 提醒：用户 {schedule.sender_name} 让我提醒你：{schedule.event_content}"
         
         # 获取人格设定
         system_prompt = await self._get_persona_prompt(schedule.unified_msg_origin)
@@ -712,10 +765,13 @@ class ReminderPlugin(Star):
         if not provider:
             return f"⏰ 提醒：{schedule.sender_name}，您之前设定的提醒时间到了！\n📌 事项：{schedule.event_content}"
         
-        prompt = f"""现在需要提醒用户一个之前设定的事项，请生成一条友好的提醒消息。
+        context_desc = "用户自己设定的提醒" if is_self_reminder else f"用户 {schedule.sender_name} 委托你提醒目标用户"
+        
+        prompt = f"""现在需要发送一条日程提醒消息。
 
+场景：{context_desc}
 提醒信息：
-- 用户名：{schedule.sender_name}
+- 设定人：{schedule.sender_name}
 - 事项：{schedule.event_content}
 - 原始设定时间描述：{schedule.raw_time_str}
 {f'- 相关信息：{schedule.search_info}' if schedule.search_info else ''}
@@ -724,10 +780,10 @@ class ReminderPlugin(Star):
 {system_prompt if system_prompt else "你是一个贴心的助手"}
 
 要求：
-1. 称呼用户或使用适当的提醒语
-2. 清楚说明要提醒的事项
-3. 语气自然、友好
-4. 可以适当添加emoji
+1. 如果是帮别人提醒，请在消息中说明是“{schedule.sender_name}”让我提醒的。
+2. 清楚说明要提醒的事项。
+3. 语气自然、友好，符合人设。
+4. 可以适当添加emoji。
 """
 
         try:
@@ -735,7 +791,7 @@ class ReminderPlugin(Star):
             return response.completion_text.strip()
         except Exception as e:
             logger.error(f"生成提醒消息失败: {e}")
-            return f"⏰ 提醒：{schedule.sender_name}，您之前设定的提醒时间到了！\n📌 事项：{schedule.event_content}"
+            return f"⏰ 提醒：{schedule.event_content}"
 
     # ==================== 网络搜索 ====================
     
