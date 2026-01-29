@@ -141,6 +141,12 @@ class ReminderPlugin(Star):
         message_str = event.message_str.strip()
         if not message_str:
             return
+
+        # 防止与指令冲突：如果消息以指令前缀开头，则忽略
+        # 这里列出插件注册的指令和常见的指令前缀
+        cmd_prefixes = ["/callme", "/提醒我", "/remind", "callme", "提醒我", "remind"]
+        if any(message_str.lower().startswith(prefix) for prefix in cmd_prefixes):
+            return
         
         # 第一步：判断是否触发日程设定
         is_trigger = await self._is_schedule_trigger(message_str, event)
@@ -526,10 +532,23 @@ class ReminderPlugin(Star):
                 return
             
             # 生成语音
-            # 注意：这里需要根据AstrBot实际的TTS API来调整
-            audio_data = await tts_provider.text_to_speech(message)
-            
+            # 尝试调用不同的 TTS 接口以兼容不同的 Provider
+            audio_data = None
+            if hasattr(tts_provider, 'generate_voice'):
+                audio_data = await tts_provider.generate_voice(message)
+            elif hasattr(tts_provider, 'text_to_speech'):
+                audio_data = await tts_provider.text_to_speech(message)
+            else:
+                logger.error(f"TTS Provider {type(tts_provider).__name__} 没有找到支持的语音生成方法 (generate_voice 或 text_to_speech)")
+                return
+
             if audio_data:
+                # 如果返回的是对象（如 Result），尝试获取音频数据
+                if hasattr(audio_data, 'audio_content'): # 某些 API 可能返回对象
+                    audio_data = audio_data.audio_content
+                elif hasattr(audio_data, 'content'):
+                    audio_data = audio_data.content
+                
                 # 保存语音文件
                 audio_path = os.path.join(self.data_dir, f"tts_{schedule.id}.wav")
                 with open(audio_path, 'wb') as f:
@@ -657,20 +676,22 @@ class ReminderPlugin(Star):
         if not provider:
             return f"✅ 好的，我会在{time_str}提醒您：{event_content}"
         
-        prompt = f"""用户刚刚设置了一个日程提醒，请生成一条友好的确认消息。
+        prompt = f"""用户刚刚设置了一个日程提醒，请你根据你的人格设定，生成一条确认消息。
 
 日程信息：
 - 时间：{time_str}
 - 事件：{event_content}
 
-请根据以下角色设定生成回复：
+当前人格设定：
 {system_prompt if system_prompt else "你是一个贴心的助手"}
 
 要求：
-1. 确认已记录日程
-2. 语气自然、友好
-3. 简洁明了，不超过50字
-"""
+1. 必须体现你的人格特色（口癖、语气、态度等）。
+2. 明确告知用户你已经记下了，会准时提醒。
+3. 不要太长，一两句话即可。
+4. 不要输出任何非回复内容（如“好的”、“根据设定...”等）。
+
+请直接生成回复内容："""
 
         try:
             response = await provider.text_chat(prompt=prompt)
