@@ -126,5 +126,11 @@
     "type": "bool",
     "hint": "是否将日程数据持久化存储（重启后保留）",
     "default": true
+  },
+  "user_alias": {
+    "description": "用户称呼映射",
+    "type": "object",
+    "hint": "配置用户ID到称呼的映射，如 {\"123456\": \"老板\"}",
+    "default": {}
   }
 }

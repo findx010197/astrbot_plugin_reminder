@@ -942,16 +942,28 @@ class ReminderPlugin(Star):
             logger.error(f"生成确认回复失败: {e}")
             return f"✅ 好的，我会在{time_str}提醒您：{event_content}"
 
+    def _get_user_display_name(self, user_id: str, default_name: str) -> str:
+        """获取用户显示名称（优先使用配置的别名）"""
+        user_alias = self.config.get("user_alias", {})
+        if user_id in user_alias:
+            return user_alias[user_id]
+        return default_name
+
     async def _generate_reminder_message(self, schedule: ScheduleItem) -> str:
         """生成提醒消息"""
         is_self_reminder = (
             schedule.target_id == schedule.sender_id or not schedule.target_id
         )
 
+        # 获取用户显示名称（优先使用配置的别名）
+        sender_display = self._get_user_display_name(
+            schedule.sender_id, schedule.sender_name
+        )
+
         # 基础兜底回复
         base_reply = f"{schedule.event_content}的时间到了哦！"
         if not is_self_reminder:
-            base_reply = f"{schedule.sender_name} 让我提醒你，{schedule.event_content}的时间到了哦！"
+            base_reply = f"是{sender_display}让我来提醒你{schedule.event_content}的哦~"
 
         if not self.config.get("enable_personality", True):
             return base_reply
@@ -970,10 +982,15 @@ class ReminderPlugin(Star):
         # 此时系统已经@了目标用户，所以直接对目标用户说话，称呼为“你”
         if is_self_reminder:
             context_rule = (
-                "场景：用户设定时间提醒自己。规则：直接对用户说话，使用“你”称呼。"
+                "场景：用户自己设了提醒。规则：直接对用户说话，"
+                '使用"你"称呼，不用提及"谁让我提醒"。'
             )
         else:
-            context_rule = f"场景：受 {schedule.sender_name} 委托来提醒当前用户（{schedule.target_name}）。规则：必须提及委托人 {schedule.sender_name}，并对当前用户使用“你”称呼。"
+            context_rule = (
+                f"场景：{sender_display}委托来提醒当前用户。"
+                f"规则：自然地提及是{sender_display}让你来提醒的，"
+                '对当前用户使用"你"称呼。'
+            )
 
         prompt = f"""请生成一条日程提醒消息。
 
@@ -986,10 +1003,10 @@ class ReminderPlugin(Star):
 
 【交互规则】
 1. **极致简短**：除去事项内容，你的发挥空间仅限30字以内。
-2. **拒绝机械**：禁止说“系统提醒”、“时间到了”，要自然流畅，像在耳边轻声低语。
-3. **句式参考**：
-   - （自己提醒）“嗯~ 你该去{schedule.event_content}了哦~”
-   - （他人提醒）“{schedule.sender_name} 让我喊你{schedule.event_content}呢~”
+2. **拒绝机械**：禁止说"系统提醒"、"时间到了"等生硬词汇，要自然流畅，像朋友间的提醒。
+3. **句式参考**（灵活发挥，不要照搬）：
+   - （自己提醒）"嗯~ 该去{schedule.event_content}啦~"、"喂喂，你不是要{schedule.event_content}吗~"
+   - （他人提醒）"是{sender_display}让我来喊你{schedule.event_content}的呢~"、"{sender_display}托我提醒你{schedule.event_content}哦~"
 
 【绝对禁忌】
 - 严禁输出思考过程（<think>）。
