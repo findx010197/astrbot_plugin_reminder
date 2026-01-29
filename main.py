@@ -30,7 +30,8 @@ class ReminderStatus(Enum):
 @dataclass
 class ScheduleItem:
     """日程数据结构"""
-    id: str                          # 唯一ID
+    id: str                          # 唯一ID（完整标识符）
+    short_id: str                    # 短ID（用于用户交互，如 "R001"）
     unified_msg_origin: str          # 会话标识
     sender_id: str                   # 发送者ID（创建者）
     sender_name: str                 # 发送者名称
@@ -53,6 +54,15 @@ class ScheduleItem:
             data["target_id"] = data.get("sender_id", "")
         if "target_name" not in data:
             data["target_name"] = data.get("sender_name", "")
+        # 兼容旧数据：如果没有short_id，生成一个
+        if "short_id" not in data:
+            # 从旧ID中提取时间戳部分的后4位作为短ID
+            old_id = data.get("id", "")
+            if "_" in old_id:
+                ts_part = old_id.split("_")[-1]
+                data["short_id"] = f"R{ts_part[-4:]}"
+            else:
+                data["short_id"] = f"R{hash(old_id) % 10000:04d}"
         return cls(**data)
 
 
@@ -68,14 +78,34 @@ class ReminderPlugin(Star):
         self.timers: Dict[str, asyncio.Task] = {}
         # 存储日程信息
         self.schedules: Dict[str, ScheduleItem] = {}
+        # 短ID到完整ID的映射（方便快速查找）
+        self.short_id_map: Dict[str, str] = {}
+        # 短ID计数器（每个用户独立计数）
+        self.user_id_counters: Dict[str, int] = {}
         
         # 数据存储路径
         # 强制转换为 str 以兼容不同版本的 AstrBot 和防止路径拼接错误
         base_path = str(get_astrbot_data_path())
         self.data_dir = os.path.join(base_path, "plugin_data", "astrbot_plugin_reminder")
         self.data_file = os.path.join(self.data_dir, "schedules.json")
+        self.counter_file = os.path.join(self.data_dir, "id_counters.json")
         
         logger.info(f"日程提醒插件配置加载完成: {self.config}")
+    
+    def _generate_short_id(self, sender_id: str) -> str:
+        """为用户生成下一个短ID"""
+        # 获取该用户当前的计数
+        counter = self.user_id_counters.get(sender_id, 0) + 1
+        self.user_id_counters[sender_id] = counter
+        # 格式: R + 4位数字，循环使用
+        return f"R{counter % 10000:04d}"
+    
+    def _rebuild_short_id_map(self):
+        """重建短ID映射表"""
+        self.short_id_map.clear()
+        for schedule_id, schedule in self.schedules.items():
+            if schedule.short_id:
+                self.short_id_map[schedule.short_id] = schedule_id
 
     async def initialize(self):
         """插件初始化"""
@@ -107,6 +137,11 @@ class ReminderPlugin(Star):
     async def _load_schedules(self):
         """从文件加载日程数据"""
         try:
+            # 加载ID计数器
+            if os.path.exists(self.counter_file):
+                with open(self.counter_file, 'r', encoding='utf-8') as f:
+                    self.user_id_counters = json.load(f)
+            
             if os.path.exists(self.data_file):
                 with open(self.data_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -122,6 +157,9 @@ class ReminderPlugin(Star):
                         timer_task = asyncio.create_task(self._reminder_timer(delay, item.id))
                         self.timers[item.id] = timer_task
                 
+                # 重建短ID映射
+                self._rebuild_short_id_map()
+                
                 logger.info(f"已加载 {len(self.schedules)} 个待执行日程")
         except Exception as e:
             logger.error(f"加载日程数据失败: {e}")
@@ -129,9 +167,15 @@ class ReminderPlugin(Star):
     async def _save_schedules(self):
         """保存日程数据到文件"""
         try:
+            # 保存日程数据
             data = [item.to_dict() for item in self.schedules.values()]
             with open(self.data_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            # 保存ID计数器
+            with open(self.counter_file, 'w', encoding='utf-8') as f:
+                json.dump(self.user_id_counters, f, ensure_ascii=False, indent=2)
+            
             logger.debug(f"已保存 {len(data)} 个日程")
         except Exception as e:
             logger.error(f"保存日程数据失败: {e}")
@@ -363,18 +407,56 @@ class ReminderPlugin(Star):
         ]
         
         if not user_schedules:
-            yield event.plain_result("您当前没有待执行的提醒。")
+            yield event.plain_result("📭 您当前没有待执行的提醒哦~")
             return
         
         # 按触发时间排序
         user_schedules.sort(key=lambda x: x.trigger_time)
         
-        result_lines = ["📋 您的提醒列表：\n"]
+        # 构建美观的列表
+        result_lines = [
+            "╔═══════════════════════════╗",
+            "║     📋 我的提醒列表       ║",
+            "╠═══════════════════════════╣"
+        ]
+        
+        now = datetime.now()
+        
         for i, schedule in enumerate(user_schedules, 1):
             trigger_dt = datetime.fromtimestamp(schedule.trigger_time)
-            time_str = trigger_dt.strftime("%m月%d日 %H:%M")
-            result_lines.append(f"{i}. [{time_str}] {schedule.event_content}")
-            result_lines.append(f"   ID: {schedule.id[:8]}...")
+            
+            # 智能显示时间
+            if trigger_dt.date() == now.date():
+                # 今天，只显示时间
+                time_str = f"今天 {trigger_dt.strftime('%H:%M')}"
+            elif trigger_dt.date() == (now + timedelta(days=1)).date():
+                # 明天
+                time_str = f"明天 {trigger_dt.strftime('%H:%M')}"
+            else:
+                # 其他日期
+                time_str = trigger_dt.strftime("%m/%d %H:%M")
+            
+            # 事件内容（截断过长的内容）
+            event_text = schedule.event_content
+            if len(event_text) > 12:
+                event_text = event_text[:11] + "…"
+            
+            # 目标用户标识
+            target_mark = ""
+            if schedule.target_id and schedule.target_id != schedule.sender_id:
+                target_mark = f" →@{schedule.target_name[:4]}" if schedule.target_name else " →@他人"
+            
+            # 格式化每行
+            result_lines.append(f"║ {schedule.short_id} │ {time_str}")
+            result_lines.append(f"║      └─ {event_text}{target_mark}")
+            
+            if i < len(user_schedules):
+                result_lines.append("║ ─────────────────────────")
+        
+        result_lines.append("╚═══════════════════════════╝")
+        result_lines.append("")
+        result_lines.append("💡 取消提醒: /callme cancel <ID>")
+        result_lines.append(f"   如: /callme cancel {user_schedules[0].short_id}")
         
         yield event.plain_result("\n".join(result_lines))
 
@@ -382,23 +464,46 @@ class ReminderPlugin(Star):
     async def cancel_reminder(self, event: AstrMessageEvent, reminder_id: str = ""):
         """取消提醒
         
-        用法: /callme cancel <提醒ID前缀>
+        用法: /callme cancel <提醒ID>
+        示例: /callme cancel R0001
         """
         if not reminder_id:
-            yield event.plain_result("请提供要取消的提醒ID（可以只输入前几位）。\n用法: /callme cancel <ID前缀>")
+            yield event.plain_result("请提供要取消的提醒ID。\n用法: /callme cancel <ID>\n示例: /callme cancel R0001")
             return
         
         sender_id = event.get_sender_id()
+        reminder_id = reminder_id.upper()  # 统一转大写
         
-        # 查找匹配的日程
+        # 查找匹配的日程（支持短ID和完整ID）
         matched = None
-        for sid, schedule in self.schedules.items():
-            if sid.startswith(reminder_id) and schedule.sender_id == sender_id:
-                matched = schedule
-                break
+        
+        # 1. 先尝试短ID精确匹配
+        if reminder_id in self.short_id_map:
+            full_id = self.short_id_map[reminder_id]
+            if full_id in self.schedules:
+                schedule = self.schedules[full_id]
+                if schedule.sender_id == sender_id:
+                    matched = schedule
+        
+        # 2. 短ID前缀匹配（如输入 R1 匹配 R0001）
+        if not matched:
+            for short_id, full_id in self.short_id_map.items():
+                if short_id.startswith(reminder_id) or reminder_id in short_id:
+                    if full_id in self.schedules:
+                        schedule = self.schedules[full_id]
+                        if schedule.sender_id == sender_id:
+                            matched = schedule
+                            break
+        
+        # 3. 完整ID前缀匹配（兼容旧方式）
+        if not matched:
+            for sid, schedule in self.schedules.items():
+                if sid.startswith(reminder_id) and schedule.sender_id == sender_id:
+                    matched = schedule
+                    break
         
         if not matched:
-            yield event.plain_result(f"未找到ID以 '{reminder_id}' 开头的提醒，或该提醒不属于您。")
+            yield event.plain_result(f"❌ 未找到ID为 '{reminder_id}' 的提醒\n\n请使用 /callme list 查看您的提醒列表")
             return
         
         # 取消定时任务
@@ -406,7 +511,11 @@ class ReminderPlugin(Star):
             self.timers[matched.id].cancel()
             del self.timers[matched.id]
         
-        # 更新状态
+        # 从映射表中移除
+        if matched.short_id in self.short_id_map:
+            del self.short_id_map[matched.short_id]
+        
+        # 更新状态并移除
         matched.status = ReminderStatus.CANCELLED.value
         del self.schedules[matched.id]
         
@@ -414,7 +523,17 @@ class ReminderPlugin(Star):
         if self.config.get("data_persistence", True):
             await self._save_schedules()
         
-        yield event.plain_result(f"✅ 已取消提醒：{matched.event_content}")
+        # 美化取消确认消息
+        trigger_dt = datetime.fromtimestamp(matched.trigger_time)
+        time_str = trigger_dt.strftime("%m月%d日 %H:%M")
+        
+        yield event.plain_result(
+            f"✅ 已取消提醒\n"
+            f"─────────────\n"
+            f"📌 {matched.event_content}\n"
+            f"⏰ {time_str}\n"
+            f"🏷️ {matched.short_id}"
+        )
 
     @filter.command("callme", alias={"提醒我", "remind"})
     async def callme_quick(self, event: AstrMessageEvent):
@@ -522,10 +641,14 @@ class ReminderPlugin(Star):
                 "message": "提醒时间必须是将来的时间。"
             }
         
+        # 生成ID
+        schedule_id = f"{sender_id}_{int(time.time() * 1000)}"  # 完整ID用于内部索引
+        short_id = self._generate_short_id(sender_id)  # 短ID用于用户交互
+        
         # 创建日程对象
-        schedule_id = f"{sender_id}_{int(time.time() * 1000)}"
         schedule = ScheduleItem(
             id=schedule_id,
+            short_id=short_id,
             unified_msg_origin=event.unified_msg_origin,
             sender_id=sender_id,
             sender_name=event.get_sender_name(),
@@ -541,6 +664,8 @@ class ReminderPlugin(Star):
         
         # 存储日程
         self.schedules[schedule_id] = schedule
+        # 更新短ID映射
+        self.short_id_map[short_id] = schedule_id
         
         # 创建定时任务
         delay = trigger_time - time.time()
@@ -551,7 +676,8 @@ class ReminderPlugin(Star):
         if self.config.get("data_persistence", True):
             await self._save_schedules()
         
-        logger.info(f"已创建日程 {schedule_id}，将在 {delay:.0f} 秒后触发")
+        trigger_dt = datetime.fromtimestamp(trigger_time)
+        logger.info(f"已创建日程 [{short_id}] {schedule_info.get('event')}, 触发时间: {trigger_dt.strftime('%m/%d %H:%M')}")
         
         return {
             "success": True,
@@ -566,11 +692,17 @@ class ReminderPlugin(Star):
             
             if schedule_id in self.schedules:
                 schedule = self.schedules[schedule_id]
+                short_id = schedule.short_id
+                
                 await self._send_reminder(schedule)
                 
                 # 更新状态
                 schedule.status = ReminderStatus.TRIGGERED.value
                 del self.schedules[schedule_id]
+                
+                # 清理短ID映射
+                if short_id and short_id in self.short_id_map:
+                    del self.short_id_map[short_id]
                 
                 if schedule_id in self.timers:
                     del self.timers[schedule_id]
@@ -578,6 +710,8 @@ class ReminderPlugin(Star):
                 # 保存数据
                 if self.config.get("data_persistence", True):
                     await self._save_schedules()
+                
+                logger.info(f"提醒 {short_id} 已触发并完成")
                     
         except asyncio.CancelledError:
             logger.info(f"提醒任务 {schedule_id} 已被取消")
