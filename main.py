@@ -786,32 +786,31 @@ class ReminderPlugin(Star):
         
         # 获取人格设定
         system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
+        if not system_prompt:
+            # 默认人设：少女哥伦比娅风格
+            system_prompt = "你说话语气绵软慵懒，语速舒缓，带着一丝漫不经心的疏离感，却又娇憨柔和。习惯带“哦~”、“呢”、“呀”等轻柔尾音。"
         
-        provider = await self._get_main_provider(event)
-        if not provider:
-            return f"✅ 好的，我会在{time_str}提醒{'您' if is_self else target_name}：{event_content}"
+        target_rule = '请使用“你”来称呼，语气要贴心。' if is_self else f'禁止使用“你”，必须直呼其名“{target_name}”。'
         
-        target_desc = "用户自己" if is_self else f"用户 {target_name}"
-        
-        prompt = f"""用户刚刚设置了一个日程提醒，请你根据你的人格设定，生成一条确认消息。
+        prompt = f"""请根据你的人设生成一条日程确认消息。
 
-日程信息：
+【当前人设】
+{system_prompt}
+
+【日程信息】
 - 提醒时间：{time_str}
 - 提醒事件：{event_content}
-- 提醒对象：{target_desc}
+- 提醒对象：{"用户自己" if is_self else target_name}
 
-当前人格设定：
-{system_prompt if system_prompt else "你是一个贴心的助手"}
+【交互规则】
+1. **必须明确告知“已经记下”**，一两句话结束，不要啰嗦。
+2. 关于对象称呼：{target_rule}
 
-要求：
-1. 必须体现你的人格特色（口癖、语气、态度等）。
-2. 明确告知用户你已经记下了。
-3. 如果是提醒**别人**（提醒对象不是“用户自己”），请在回复中明确说“我会提醒 {target_name}”或“会去叫 {target_name}”，**不要**说“提醒您”。
-4. 如果是提醒**自己**，则说“提醒您”。
-5. 不要太长，一两句话即可。
-6. 绝对不要输出任何思考过程（如<think>标签）或非回复内容。
+【绝对禁忌】
+- 严禁输出思考过程（<think>）。
+- 严禁使用“好的”、“收到”等客服式用语。
 
-请直接生成回复内容："""
+请直接生成回复："""
 
         try:
             response = await provider.text_chat(prompt=prompt)
@@ -834,29 +833,39 @@ class ReminderPlugin(Star):
         
         # 获取人格设定
         system_prompt = await self._get_persona_prompt(schedule.unified_msg_origin)
-        
+        if not system_prompt:
+             # 默认人设：少女哥伦比娅风格
+            system_prompt = "你说话语气绵软慵懒，语速舒缓，带着一丝漫不经心的疏离感，却又娇憨柔和。习惯带“哦~”、“呢”、“呀”等轻柔尾音。"
+
         provider = await self._get_main_provider_by_umo(schedule.unified_msg_origin)
         if not provider:
             return base_reply
         
-        context_desc = "用户提醒自己" if is_self_reminder else f"用户 {schedule.sender_name} 委托你提醒 {schedule.target_name}"
-        
-        prompt = f"""请生成一句简短自然的日程提醒。
+        # 构建动态规则
+        if is_self_reminder:
+            context_rule = "场景：用户提醒自己。规则：直接轻柔呼唤，使用“你”称呼。"
+        else:
+            context_rule = f"场景：受 {schedule.sender_name} 委托提醒 {schedule.target_name}。规则：必须带上委托人名字（{schedule.sender_name}），并直呼对象名字。"
 
-场景：{context_desc}
-提醒事项：{schedule.event_content}
-当前人格：
-{system_prompt if system_prompt else "你是一个可爱的助手"}
+        prompt = f"""请生成一条日程提醒消息。
 
-要求：
-1. **非常简短**：除去事项内容，你的发挥空间只有20字左右。
-2. **风格自然**：拒绝机械感（不要说“根据设定”、“系统提醒”），要像朋友一样说话。
+【当前人设】
+{system_prompt}
+
+【提醒信息】
+- 事项：{schedule.event_content}
+- {context_rule}
+
+【交互规则】
+1. **极致简短**：除去事项内容，你的发挥空间仅限20字以内。
+2. **拒绝机械**：禁止说“系统提醒”、“时间到了”，要自然流畅，像在耳边轻声低语。
 3. **句式参考**：
-   - "{target_name}，{schedule.event_content}的时间到了哦~"
-   - "{target_name}，该{schedule.event_content}啦！"
-   - "注意啦{target_name}，是时候{schedule.event_content}了。"
-4. 如果是帮别人提醒，必须带上委托人（如“{schedule.sender_name}让我喊你...”）。
-5. 直接输出回复内容，不要包含任何标签或解释。
+   - “嗯~ {schedule.event_content}的时间到了哦~”
+   - “{schedule.sender_name} 让我喊你{schedule.event_content}呢~”
+
+【绝对禁忌】
+- 严禁输出思考过程（<think>）。
+- 严禁出现与日程无关的闲聊。
 
 请直接生成回复："""
 
@@ -864,7 +873,6 @@ class ReminderPlugin(Star):
             response = await provider.text_chat(prompt=prompt)
             raw_text = response.completion_text.strip()
             cleaned_text = self._clean_llm_response(raw_text)
-            # 最后的长度安全检查，如果太长则截断或使用基础回复
             if len(cleaned_text) > 100: 
                 return base_reply
             return cleaned_text
