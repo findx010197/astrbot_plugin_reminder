@@ -824,49 +824,53 @@ class ReminderPlugin(Star):
     async def _generate_reminder_message(self, schedule: ScheduleItem) -> str:
         """生成提醒消息"""
         is_self_reminder = schedule.target_id == schedule.sender_id or not schedule.target_id
+        target_name = "您" if is_self_reminder else f"@{schedule.target_name}"
+        
+        # 基础兜底回复
+        base_reply = f"{target_name}，{schedule.event_content}的时间到了哦！"
         
         if not self.config.get("enable_personality", True):
-            if is_self_reminder:
-                return f"⏰ 提醒：{schedule.sender_name}，您之前设定的提醒时间到了！\n📌 事项：{schedule.event_content}"
-            else:
-                return f"⏰ 提醒：用户 {schedule.sender_name} 让我提醒你：{schedule.event_content}"
+            return base_reply
         
         # 获取人格设定
         system_prompt = await self._get_persona_prompt(schedule.unified_msg_origin)
         
         provider = await self._get_main_provider_by_umo(schedule.unified_msg_origin)
         if not provider:
-            return f"⏰ 提醒：{schedule.sender_name}，您之前设定的提醒时间到了！\n📌 事项：{schedule.event_content}"
+            return base_reply
         
-        context_desc = "用户自己设定的提醒" if is_self_reminder else f"用户 {schedule.sender_name} 委托你提醒目标用户"
+        context_desc = "用户提醒自己" if is_self_reminder else f"用户 {schedule.sender_name} 委托你提醒 {schedule.target_name}"
         
-        prompt = f"""现在需要发送一条日程提醒消息。
+        prompt = f"""请生成一句简短自然的日程提醒。
 
 场景：{context_desc}
-提醒信息：
-- 设定人：{schedule.sender_name}
-- 事项：{schedule.event_content}
-- 原始设定时间描述：{schedule.raw_time_str}
-{f'- 相关信息：{schedule.search_info}' if schedule.search_info else ''}
-
-请根据以下角色设定生成提醒消息：
-{system_prompt if system_prompt else "你是一个贴心的助手"}
+提醒事项：{schedule.event_content}
+当前人格：
+{system_prompt if system_prompt else "你是一个可爱的助手"}
 
 要求：
-1. 如果是帮别人提醒，请在消息中说明是“{schedule.sender_name}”让我提醒的。
-2. 清楚说明要提醒的事项。
-3. 语气自然、友好，符合人设。
-4. 可以适当添加emoji。
-5. 绝对不要输出任何思考过程（如<think>标签）或非回复内容。
-"""
+1. **非常简短**：除去事项内容，你的发挥空间只有20字左右。
+2. **风格自然**：拒绝机械感（不要说“根据设定”、“系统提醒”），要像朋友一样说话。
+3. **句式参考**：
+   - "{target_name}，{schedule.event_content}的时间到了哦~"
+   - "{target_name}，该{schedule.event_content}啦！"
+   - "注意啦{target_name}，是时候{schedule.event_content}了。"
+4. 如果是帮别人提醒，必须带上委托人（如“{schedule.sender_name}让我喊你...”）。
+5. 直接输出回复内容，不要包含任何标签或解释。
+
+请直接生成回复："""
 
         try:
             response = await provider.text_chat(prompt=prompt)
             raw_text = response.completion_text.strip()
-            return self._clean_llm_response(raw_text)
+            cleaned_text = self._clean_llm_response(raw_text)
+            # 最后的长度安全检查，如果太长则截断或使用基础回复
+            if len(cleaned_text) > 100: 
+                return base_reply
+            return cleaned_text
         except Exception as e:
             logger.error(f"生成提醒消息失败: {e}")
-            return f"⏰ 提醒：{schedule.event_content}"
+            return base_reply
 
     # ==================== 网络搜索 ====================
     
