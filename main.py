@@ -790,6 +790,10 @@ class ReminderPlugin(Star):
             # 默认人设：少女哥伦比娅风格
             system_prompt = "你说话语气绵软慵懒，语速舒缓，带着一丝漫不经心的疏离感，却又娇憨柔和。习惯带“哦~”、“呢”、“呀”等轻柔尾音。"
         
+        provider = await self._get_main_provider(event)
+        if not provider:
+            return f"✅ 好的，我会在{time_str}提醒{'您' if is_self else target_name}：{event_content}"
+
         target_rule = '请使用“你”来称呼，语气要贴心。' if is_self else f'禁止使用“你”，必须直呼其名“{target_name}”。'
         
         prompt = f"""请根据你的人设生成一条日程确认消息。
