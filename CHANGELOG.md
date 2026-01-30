@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v3.1.2] - 2026-01-30
+
+### Fixed
+- 修复了 "提醒@某人" 格式指令无法被插件捕获，而被系统默认 reminder 工具抢占的问题。
+- 扩大了默认触发关键词范围，新增 "提醒"、"帮我提醒" 等。
+
 ## [v3.1.1] - 2026-01-30
 
 ### Fixed

@@ -169,6 +169,8 @@ class ReminderPlugin(Star):
             "trigger_keywords",
             [
                 "提醒我",
+                "提醒",
+                "帮我提醒",
                 "设置提醒",
                 "定时提醒",
                 "日程提醒",
@@ -324,6 +326,8 @@ class ReminderPlugin(Star):
             "trigger_keywords",
             [
                 "提醒我",
+                "提醒",
+                "帮我提醒",
                 "设置提醒",
                 "定时提醒",
                 "日程提醒",
