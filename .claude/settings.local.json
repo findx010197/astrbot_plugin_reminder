@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m json.tool:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(ls:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: 人设系统优化与循环日程支持 \\(v3.0.0\\)\n\n## 核心改进\n\n### 人设系统重构\n- 新增 reminder_persona_list 结构化人设预设库\n- 每套人设包含：人物设定、事件处理指导、内容生成约束、字数限制、昵称使用约束\n- 实现 _get_reminder_persona\\(\\) 统一人设管理接口\n- 实现 _build_persona_system_prompt\\(\\) 人设提示词生成\n\n### 默认配置优化  \n- reminder_persona.enabled 默认启用为 true\n- 内置三套人设：哥伦比娅（温柔慵懒）、元气少女（活泼热情）、冷淡管家（专业简洁）\n- 哥伦比娅为默认人设，大幅丰富人设信息\n\n### 消息生成逻辑统一\n- 统一 _generate_confirmation_response 与 _generate_reminder_message 的人设使用\n- 优先使用专用提醒人设 → 回退系统人设 → 默认人设\n- 使用人设配置中的 max_length 动态控制字数\n- 强制使用用户别名映射，确保个人化表达\n\n### 循环日程支持\n- 添加 RecurrenceType 枚举（daily/weekly/monthly/yearly）\n- 数据库新增循环日程字段（recurrence_type/recurrence_value/recurrence_time/trigger_count）\n- 数据库版本更新至 v2，自动迁移旧数据\n- ScheduleItem 添加 is_recurring 属性\n\n### 版本更新\n- 版本号升级至 v3.0.0\n- 更新插件描述，包含循环日程与戳一戳功能\n\n## 技术细节\n- 严格控制LLM生成内容，禁止无关文本\n- 明确定义每套人设的内容约束和输出要求\n- 完整的人设信息包含背景设定、处理指导、约束条件\n- 兼容旧版数据格式，无需手动迁移\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "Bash(git pull:*)",
+      "Bash(git merge main --no-edit)"
+    ]
+  }
+}
