@@ -23,7 +23,6 @@ from .database import (
     ScheduleDatabase,
     ScheduleItem,
     ReminderStatus,
-    RecurrenceType,
     migrate_from_json,
 )
 
@@ -35,7 +34,7 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_
     "astrbot_plugin_reminder",
     "findx010197",
     "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳",
-    "3.0.0",
+    "2.2.1",
     "https://github.com/findx010197/astrbot_plugin_reminder",
 )
 class ReminderPlugin(Star):

@@ -23,6 +23,16 @@ class ReminderStatus(Enum):
     CANCELLED = "cancelled"  # 已取消
 
 
+class RecurrenceType(Enum):
+    """循环日程类型枚举"""
+
+    NONE = "none"  # 不循环
+    DAILY = "daily"  # 每天
+    WEEKLY = "weekly"  # 每周
+    MONTHLY = "monthly"  # 每月
+    YEARLY = "yearly"  # 每年
+
+
 @dataclass
 class ScheduleItem:
     """日程数据结构"""
@@ -40,6 +50,10 @@ class ScheduleItem:
     search_info: str = ""  # 网络搜索获取的信息
     target_id: str = ""  # 目标用户ID（为空则默认为sender_id）
     target_name: str = ""  # 目标用户名称
+    recurrence_type: str = "none"  # 循环类型（none/daily/weekly/monthly/yearly）
+    recurrence_value: str = ""  # 循环值（如星期几、几号）
+    recurrence_time: str = ""  # 循环触发时间（HH:MM格式）
+    trigger_count: int = 0  # 已触发次数
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -61,6 +75,10 @@ class ScheduleItem:
             search_info=row[10] or "",
             target_id=row[11] or "",
             target_name=row[12] or "",
+            recurrence_type=row[13] or "none" if len(row) > 13 else "none",
+            recurrence_value=row[14] or "" if len(row) > 14 else "",
+            recurrence_time=row[15] or "" if len(row) > 15 else "",
+            trigger_count=row[16] or 0 if len(row) > 16 else 0,
         )
 
 
@@ -129,7 +147,11 @@ class ScheduleDatabase:
                     raw_time_str TEXT,
                     search_info TEXT,
                     target_id TEXT,
-                    target_name TEXT
+                    target_name TEXT,
+                    recurrence_type TEXT DEFAULT 'none',
+                    recurrence_value TEXT,
+                    recurrence_time TEXT,
+                    trigger_count INTEGER DEFAULT 0
                 )
             """)
 
@@ -194,8 +216,9 @@ class ScheduleDatabase:
                     INSERT INTO schedules (
                         id, short_id, unified_msg_origin, sender_id, sender_name,
                         event_content, trigger_time, created_at, status,
-                        raw_time_str, search_info, target_id, target_name
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        raw_time_str, search_info, target_id, target_name,
+                        recurrence_type, recurrence_value, recurrence_time, trigger_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         schedule.id,
@@ -211,6 +234,10 @@ class ScheduleDatabase:
                         schedule.search_info,
                         schedule.target_id,
                         schedule.target_name,
+                        schedule.recurrence_type,
+                        schedule.recurrence_value,
+                        schedule.recurrence_time,
+                        schedule.trigger_count,
                     ),
                 )
             return True
@@ -233,7 +260,8 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
                 FROM schedules WHERE id = ?
             """,
                 (schedule_id,),
@@ -262,8 +290,9 @@ class ScheduleDatabase:
                     """
                     SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                            event_content, trigger_time, created_at, status,
-                           raw_time_str, search_info, target_id, target_name
-                    FROM schedules 
+                           raw_time_str, search_info, target_id, target_name,
+                           recurrence_type, recurrence_value, recurrence_time, trigger_count
+                    FROM schedules
                     WHERE short_id = ? AND sender_id = ? AND status = 'pending'
                 """,
                     (short_id.upper(), sender_id),
@@ -273,7 +302,8 @@ class ScheduleDatabase:
                     """
                     SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                            event_content, trigger_time, created_at, status,
-                           raw_time_str, search_info, target_id, target_name
+                           raw_time_str, search_info, target_id, target_name,
+                           recurrence_type, recurrence_value, recurrence_time, trigger_count
                     FROM schedules WHERE short_id = ? AND status = 'pending'
                 """,
                     (short_id.upper(),),
@@ -304,8 +334,9 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
-                FROM schedules 
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
+                FROM schedules
                 WHERE short_id = ? AND sender_id = ? AND status = 'pending'
             """,
                 (id_prefix, sender_id),
@@ -319,8 +350,9 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
-                FROM schedules 
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
+                FROM schedules
                 WHERE short_id LIKE ? AND sender_id = ? AND status = 'pending'
                 LIMIT 1
             """,
@@ -335,8 +367,9 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
-                FROM schedules 
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
+                FROM schedules
                 WHERE id LIKE ? AND sender_id = ? AND status = 'pending'
                 LIMIT 1
             """,
@@ -364,8 +397,9 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
-                FROM schedules 
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
+                FROM schedules
                 WHERE sender_id = ? AND status = 'pending'
                 ORDER BY trigger_time ASC
             """,
@@ -387,8 +421,9 @@ class ScheduleDatabase:
             cursor.execute("""
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
-                FROM schedules 
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
+                FROM schedules
                 WHERE status = 'pending'
                 ORDER BY trigger_time ASC
             """)
@@ -621,6 +656,15 @@ def migrate_from_json(
                         item_data["short_id"] = f"R{ts_part[-4:]}"
                     else:
                         item_data["short_id"] = f"R{hash(old_id) % 10000:04d}"
+                # 添加循环日程字段的默认值（如果不存在）
+                if "recurrence_type" not in item_data:
+                    item_data["recurrence_type"] = "none"
+                if "recurrence_value" not in item_data:
+                    item_data["recurrence_value"] = ""
+                if "recurrence_time" not in item_data:
+                    item_data["recurrence_time"] = ""
+                if "trigger_count" not in item_data:
+                    item_data["trigger_count"] = 0
 
                 schedule = ScheduleItem(**item_data)
                 if db.insert_schedule(schedule):
