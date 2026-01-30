@@ -9,6 +9,7 @@ from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import re
@@ -18,6 +19,9 @@ from typing import Dict, Optional
 
 # 导入数据库模块
 from .database import ScheduleDatabase, ScheduleItem, ReminderStatus, migrate_from_json
+
+# 用于数据库操作的线程池执行器
+_db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="db_")
 
 
 @register(
@@ -51,9 +55,14 @@ class ReminderPlugin(Star):
 
         logger.info(f"日程提醒插件配置加载完成: {self.config}")
 
+    async def _run_db_operation(self, func, *args, **kwargs):
+        """在线程池中执行数据库操作，避免阻塞事件循环"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_db_executor, lambda: func(*args, **kwargs))
+
     async def _restore_timers(self):
         """从数据库恢复定时任务"""
-        schedules = self.db.get_all_pending_schedules()
+        schedules = await self._run_db_operation(self.db.get_all_pending_schedules)
         now = time.time()
         restored = 0
 
@@ -79,8 +88,8 @@ class ReminderPlugin(Star):
         # 检查是否需要从旧JSON迁移数据
         if os.path.exists(self.old_data_file):
             logger.info("检测到旧数据文件，开始迁移...")
-            migrated = migrate_from_json(
-                self.db, self.old_data_file, self.old_counter_file
+            migrated = await self._run_db_operation(
+                migrate_from_json, self.db, self.old_data_file, self.old_counter_file
             )
             logger.info(f"已迁移 {migrated} 条日程数据到SQLite数据库")
 
@@ -88,7 +97,7 @@ class ReminderPlugin(Star):
         await self._restore_timers()
 
         # 清理过期日程
-        cleaned = self.db.cleanup_expired_schedules()
+        cleaned = await self._run_db_operation(self.db.cleanup_expired_schedules)
         if cleaned > 0:
             logger.info(f"已清理 {cleaned} 个过期日程")
 
@@ -121,6 +130,10 @@ class ReminderPlugin(Star):
         if not message_str:
             return
 
+        # 消息长度过滤：太短或太长的消息不太可能是日程请求
+        if len(message_str) < 4 or len(message_str) > 200:
+            return
+
         # 防止与指令冲突：如果消息以指令前缀开头，则忽略
         # 这里列出插件注册的指令和常见的指令前缀
         # 注意：这里不仅要匹配 /callme，还要匹配 callme（因为有些平台不需要前缀）
@@ -129,11 +142,11 @@ class ReminderPlugin(Star):
             "/callme",
             "callme",
             "/提醒我",
-            "提醒我",
             "/remind",
             "remind",
             "／callme",
             "／提醒我",  # 全角符号兼容
+            "/",  # 任何以 / 开头的指令都跳过
         ]
 
         lower_msg = message_str.lower()
@@ -144,16 +157,55 @@ class ReminderPlugin(Star):
         if lower_msg in ["list", "cancel", "help"]:
             return
 
-        # 第一步：判断是否触发日程设定
-        is_trigger = await self._is_schedule_trigger(message_str, event)
+        # 快速预过滤：先用关键词检查，避免每条消息都调用 LLM
+        trigger_keywords = self.config.get(
+            "trigger_keywords",
+            [
+                "提醒我",
+                "设置提醒",
+                "定时提醒",
+                "日程提醒",
+                "记得提醒",
+                "别忘了提醒",
+                "callme",
+                "喊我",
+                "叫我",
+            ],
+        )
+
+        # 如果不包含任何触发关键词，直接跳过（不调用 LLM）
+        has_trigger_keyword = any(keyword in message_str for keyword in trigger_keywords)
+        if not has_trigger_keyword:
+            return  # 快速返回，避免 LLM 调用
+
+        logger.info(f"[LLM监控模式] 关键词预匹配成功: {message_str}")
+
+        # 第一步：使用 LLM 进一步确认是否为日程设定请求（带超时）
+        try:
+            is_trigger = await asyncio.wait_for(
+                self._is_schedule_trigger(message_str, event),
+                timeout=10.0  # 10秒超时
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"[LLM监控模式] LLM判断超时，跳过消息: {message_str[:50]}")
+            return
 
         if not is_trigger:
             return  # 不是日程设定请求，继续其他处理
 
         logger.info(f"[LLM监控模式] 检测到日程设定请求: {message_str}")
 
-        # 第二步：提取日程信息
-        schedule_info = await self._extract_schedule_info(message_str, event)
+        # 第二步：提取日程信息（带超时）
+        try:
+            schedule_info = await asyncio.wait_for(
+                self._extract_schedule_info(message_str, event),
+                timeout=15.0  # 15秒超时
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"[LLM监控模式] 提取日程信息超时")
+            yield event.plain_result("抱歉，处理超时了，请稍后重试或使用指令模式 /callme")
+            event.stop_event()
+            return
 
         if not schedule_info:
             yield event.plain_result(
@@ -168,12 +220,28 @@ class ReminderPlugin(Star):
             schedule_info["target_id"] = target_id
             schedule_info["target_name"] = target_name
 
-        # 第三步：创建日程
-        result = await self._create_schedule(event, schedule_info)
+        # 第三步：创建日程（带超时）
+        try:
+            result = await asyncio.wait_for(
+                self._create_schedule(event, schedule_info),
+                timeout=20.0  # 20秒超时
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"[LLM监控模式] 创建日程超时")
+            yield event.plain_result("抱歉，创建日程超时了，请稍后重试")
+            event.stop_event()
+            return
 
         if result["success"]:
-            # 生成人格化回复
-            response = await self._generate_confirmation_response(schedule_info, event)
+            # 生成人格化回复（带超时，失败时使用兜底回复）
+            try:
+                response = await asyncio.wait_for(
+                    self._generate_confirmation_response(schedule_info, event),
+                    timeout=10.0  # 10秒超时
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"[LLM监控模式] 生成确认回复超时，使用兜底回复")
+                response = f"✅ 好的，我会在{schedule_info.get('time', '指定时间')}提醒您：{schedule_info.get('event', '待办事项')}"
             yield event.plain_result(response)
         else:
             yield event.plain_result(result["message"])
@@ -374,8 +442,10 @@ class ReminderPlugin(Star):
         """
         sender_id = event.get_sender_id()
 
-        # 从数据库获取用户的待执行日程
-        user_schedules = self.db.get_user_pending_schedules(sender_id)
+        # 从数据库获取用户的待执行日程（异步执行）
+        user_schedules = await self._run_db_operation(
+            self.db.get_user_pending_schedules, sender_id
+        )
 
         if not user_schedules:
             yield event.plain_result("📭 您当前没有待执行的提醒哦~")
@@ -448,8 +518,10 @@ class ReminderPlugin(Star):
         sender_id = event.get_sender_id()
         reminder_id = reminder_id.upper()  # 统一转大写
 
-        # 从数据库查找匹配的日程
-        matched = self.db.find_schedule_by_id_prefix(reminder_id, sender_id)
+        # 从数据库查找匹配的日程（异步执行）
+        matched = await self._run_db_operation(
+            self.db.find_schedule_by_id_prefix, reminder_id, sender_id
+        )
 
         if not matched:
             yield event.plain_result(
@@ -462,8 +534,10 @@ class ReminderPlugin(Star):
             self.timers[matched.id].cancel()
             del self.timers[matched.id]
 
-        # 更新数据库状态
-        self.db.update_schedule_status(matched.id, ReminderStatus.CANCELLED.value)
+        # 更新数据库状态（异步执行）
+        await self._run_db_operation(
+            self.db.update_schedule_status, matched.id, ReminderStatus.CANCELLED.value
+        )
 
         # 美化取消确认消息
         trigger_dt = datetime.fromtimestamp(matched.trigger_time)
@@ -560,9 +634,11 @@ class ReminderPlugin(Star):
         if target_id == sender_id:  # 如果相等，说明是自己，修正名称
             target_name = event.get_sender_name()
 
-        # 检查数量限制
+        # 检查数量限制（异步执行）
         max_reminders = self.config.get("max_reminders", 20)
-        user_count = self.db.count_user_pending_schedules(sender_id)
+        user_count = await self._run_db_operation(
+            self.db.count_user_pending_schedules, sender_id
+        )
 
         if user_count >= max_reminders:
             return {
@@ -583,9 +659,11 @@ class ReminderPlugin(Star):
         if trigger_time <= time.time():
             return {"success": False, "message": "提醒时间必须是将来的时间。"}
 
-        # 生成ID
+        # 生成ID（异步执行）
         schedule_id = f"{sender_id}_{int(time.time() * 1000)}"  # 完整ID用于内部索引
-        short_id = self.db.get_next_short_id(sender_id)  # 从数据库获取短ID
+        short_id = await self._run_db_operation(
+            self.db.get_next_short_id, sender_id
+        )  # 从数据库获取短ID
 
         # 创建日程对象
         schedule = ScheduleItem(
@@ -604,8 +682,9 @@ class ReminderPlugin(Star):
             target_name=target_name,
         )
 
-        # 保存到数据库
-        if not self.db.insert_schedule(schedule):
+        # 保存到数据库（异步执行）
+        success = await self._run_db_operation(self.db.insert_schedule, schedule)
+        if not success:
             return {"success": False, "message": "保存日程失败，请稍后重试。"}
 
         # 创建定时任务
@@ -625,17 +704,21 @@ class ReminderPlugin(Star):
         try:
             await asyncio.sleep(delay)
 
-            # 从数据库获取最新的日程信息
-            schedule = self.db.get_schedule_by_id(schedule_id)
+            # 从数据库获取最新的日程信息（异步执行）
+            schedule = await self._run_db_operation(
+                self.db.get_schedule_by_id, schedule_id
+            )
 
             if schedule and schedule.status == ReminderStatus.PENDING.value:
                 short_id = schedule.short_id
 
                 await self._send_reminder(schedule)
 
-                # 更新数据库状态
-                self.db.update_schedule_status(
-                    schedule_id, ReminderStatus.TRIGGERED.value
+                # 更新数据库状态（异步执行）
+                await self._run_db_operation(
+                    self.db.update_schedule_status,
+                    schedule_id,
+                    ReminderStatus.TRIGGERED.value,
                 )
 
                 # 清理内存中的定时任务引用
