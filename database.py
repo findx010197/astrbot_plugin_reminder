@@ -23,6 +23,16 @@ class ReminderStatus(Enum):
     CANCELLED = "cancelled"  # 已取消
 
 
+class RecurrenceType(Enum):
+    """循环类型枚举"""
+
+    NONE = "none"  # 不循环（一次性）
+    DAILY = "daily"  # 每天
+    WEEKLY = "weekly"  # 每周
+    MONTHLY = "monthly"  # 每月
+    YEARLY = "yearly"  # 每年
+
+
 @dataclass
 class ScheduleItem:
     """日程数据结构"""
@@ -40,13 +50,25 @@ class ScheduleItem:
     search_info: str = ""  # 网络搜索获取的信息
     target_id: str = ""  # 目标用户ID（为空则默认为sender_id）
     target_name: str = ""  # 目标用户名称
+    # 循环日程相关字段
+    recurrence_type: str = "none"  # 循环类型：none/daily/weekly/monthly/yearly
+    recurrence_value: str = ""  # 循环值（如周几、几号等），JSON格式
+    recurrence_time: str = ""  # 每次触发的时间点（如 "09:00"）
+    trigger_count: int = 0  # 已触发次数
 
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @property
+    def is_recurring(self) -> bool:
+        """是否为循环日程"""
+        return self.recurrence_type != "none" and self.recurrence_type != ""
+
     @classmethod
     def from_row(cls, row: tuple) -> "ScheduleItem":
         """从数据库行创建对象"""
+        # 兼容旧数据（没有循环字段的情况）
+        row_len = len(row)
         return cls(
             id=row[0],
             short_id=row[1],
@@ -61,6 +83,10 @@ class ScheduleItem:
             search_info=row[10] or "",
             target_id=row[11] or "",
             target_name=row[12] or "",
+            recurrence_type=row[13] if row_len > 13 else "none",
+            recurrence_value=row[14] if row_len > 14 else "",
+            recurrence_time=row[15] if row_len > 15 else "",
+            trigger_count=row[16] if row_len > 16 else 0,
         )
 
 
@@ -68,7 +94,7 @@ class ScheduleDatabase:
     """日程数据库管理类"""
 
     # 数据库版本，用于未来的迁移
-    DB_VERSION = 1
+    DB_VERSION = 2
 
     def __init__(self, db_path: str):
         """
@@ -87,6 +113,8 @@ class ScheduleDatabase:
 
         # 初始化数据库结构
         self._init_database()
+        # 执行数据库迁移
+        self._migrate_database()
 
     def _get_connection(self) -> sqlite3.Connection:
         """获取线程本地的数据库连接"""
@@ -114,7 +142,7 @@ class ScheduleDatabase:
     def _init_database(self):
         """初始化数据库表结构"""
         with self._get_cursor() as cursor:
-            # 创建日程表
+            # 创建日程表（包含循环日程字段）
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schedules (
                     id TEXT PRIMARY KEY,
@@ -129,7 +157,11 @@ class ScheduleDatabase:
                     raw_time_str TEXT,
                     search_info TEXT,
                     target_id TEXT,
-                    target_name TEXT
+                    target_name TEXT,
+                    recurrence_type TEXT DEFAULT 'none',
+                    recurrence_value TEXT DEFAULT '',
+                    recurrence_time TEXT DEFAULT '',
+                    trigger_count INTEGER DEFAULT 0
                 )
             """)
 
@@ -149,6 +181,10 @@ class ScheduleDatabase:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_schedules_short_id 
                 ON schedules(short_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_schedules_recurrence 
+                ON schedules(recurrence_type)
             """)
 
             # 创建ID计数器表
@@ -175,6 +211,44 @@ class ScheduleDatabase:
                 (str(self.DB_VERSION),),
             )
 
+    def _migrate_database(self):
+        """执行数据库迁移"""
+        with self._get_cursor() as cursor:
+            # 检查当前版本
+            cursor.execute("SELECT value FROM metadata WHERE key = 'db_version'")
+            row = cursor.fetchone()
+            current_version = int(row[0]) if row else 1
+
+            # 迁移到版本 2：添加循环日程字段
+            if current_version < 2:
+                logger.info("执行数据库迁移：添加循环日程支持...")
+                # 检查列是否存在，如果不存在则添加
+                cursor.execute("PRAGMA table_info(schedules)")
+                columns = [col[1] for col in cursor.fetchall()]
+
+                if "recurrence_type" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN recurrence_type TEXT DEFAULT 'none'"
+                    )
+                if "recurrence_value" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN recurrence_value TEXT DEFAULT ''"
+                    )
+                if "recurrence_time" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN recurrence_time TEXT DEFAULT ''"
+                    )
+                if "trigger_count" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN trigger_count INTEGER DEFAULT 0"
+                    )
+
+                # 更新版本号
+                cursor.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES ('db_version', '2')"
+                )
+                logger.info("数据库迁移完成：版本 2")
+
     # ==================== 日程 CRUD 操作 ====================
 
     def insert_schedule(self, schedule: ScheduleItem) -> bool:
@@ -194,8 +268,9 @@ class ScheduleDatabase:
                     INSERT INTO schedules (
                         id, short_id, unified_msg_origin, sender_id, sender_name,
                         event_content, trigger_time, created_at, status,
-                        raw_time_str, search_info, target_id, target_name
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        raw_time_str, search_info, target_id, target_name,
+                        recurrence_type, recurrence_value, recurrence_time, trigger_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         schedule.id,
@@ -211,6 +286,10 @@ class ScheduleDatabase:
                         schedule.search_info,
                         schedule.target_id,
                         schedule.target_name,
+                        schedule.recurrence_type,
+                        schedule.recurrence_value,
+                        schedule.recurrence_time,
+                        schedule.trigger_count,
                     ),
                 )
             return True
@@ -233,7 +312,8 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
                 FROM schedules WHERE id = ?
             """,
                 (schedule_id,),
@@ -262,7 +342,8 @@ class ScheduleDatabase:
                     """
                     SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                            event_content, trigger_time, created_at, status,
-                           raw_time_str, search_info, target_id, target_name
+                           raw_time_str, search_info, target_id, target_name,
+                           recurrence_type, recurrence_value, recurrence_time, trigger_count
                     FROM schedules 
                     WHERE short_id = ? AND sender_id = ? AND status = 'pending'
                 """,
@@ -273,7 +354,8 @@ class ScheduleDatabase:
                     """
                     SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                            event_content, trigger_time, created_at, status,
-                           raw_time_str, search_info, target_id, target_name
+                           raw_time_str, search_info, target_id, target_name,
+                           recurrence_type, recurrence_value, recurrence_time, trigger_count
                     FROM schedules WHERE short_id = ? AND status = 'pending'
                 """,
                     (short_id.upper(),),
@@ -304,7 +386,8 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
                 FROM schedules 
                 WHERE short_id = ? AND sender_id = ? AND status = 'pending'
             """,
@@ -319,7 +402,8 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
                 FROM schedules 
                 WHERE short_id LIKE ? AND sender_id = ? AND status = 'pending'
                 LIMIT 1
@@ -335,7 +419,8 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
                 FROM schedules 
                 WHERE id LIKE ? AND sender_id = ? AND status = 'pending'
                 LIMIT 1
@@ -364,7 +449,8 @@ class ScheduleDatabase:
                 """
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
                 FROM schedules 
                 WHERE sender_id = ? AND status = 'pending'
                 ORDER BY trigger_time ASC
@@ -387,7 +473,8 @@ class ScheduleDatabase:
             cursor.execute("""
                 SELECT id, short_id, unified_msg_origin, sender_id, sender_name,
                        event_content, trigger_time, created_at, status,
-                       raw_time_str, search_info, target_id, target_name
+                       raw_time_str, search_info, target_id, target_name,
+                       recurrence_type, recurrence_value, recurrence_time, trigger_count
                 FROM schedules 
                 WHERE status = 'pending'
                 ORDER BY trigger_time ASC
@@ -418,6 +505,43 @@ class ScheduleDatabase:
             return True
         except Exception as e:
             logger.error(f"更新日程状态失败: {e}")
+            return False
+
+    def update_schedule_for_next_trigger(
+        self, schedule_id: str, next_trigger_time: float, increment_count: bool = True
+    ) -> bool:
+        """
+        更新循环日程的下次触发时间
+
+        Args:
+            schedule_id: 日程ID
+            next_trigger_time: 下次触发时间戳
+            increment_count: 是否增加触发计数
+
+        Returns:
+            是否成功
+        """
+        try:
+            with self._get_cursor() as cursor:
+                if increment_count:
+                    cursor.execute(
+                        """
+                        UPDATE schedules 
+                        SET trigger_time = ?, trigger_count = trigger_count + 1
+                        WHERE id = ?
+                    """,
+                        (next_trigger_time, schedule_id),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE schedules SET trigger_time = ? WHERE id = ?
+                    """,
+                        (next_trigger_time, schedule_id),
+                    )
+            return True
+        except Exception as e:
+            logger.error(f"更新循环日程触发时间失败: {e}")
             return False
 
     def delete_schedule(self, schedule_id: str) -> bool:

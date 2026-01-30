@@ -1,6 +1,7 @@
 """
 AstrBot 智能日程提醒插件
 支持LLM监控模式和指令模式创建日程，支持TTS语音播报和网络搜索功能
+支持循环日程（每天/每周/每月/每年）
 """
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
@@ -15,10 +16,16 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 # 导入数据库模块
-from .database import ScheduleDatabase, ScheduleItem, ReminderStatus, migrate_from_json
+from .database import (
+    ScheduleDatabase,
+    ScheduleItem,
+    ReminderStatus,
+    RecurrenceType,
+    migrate_from_json,
+)
 
 # 用于数据库操作的线程池执行器
 _db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="db_")
@@ -27,8 +34,8 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_
 @register(
     "astrbot_plugin_reminder",
     "findx010197",
-    "智能日程提醒插件，支持LLM监控与指令双模式",
-    "1.0.0",
+    "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳",
+    "3.0.0",
     "https://github.com/findx010197/astrbot_plugin_reminder",
 )
 class ReminderPlugin(Star):
@@ -551,6 +558,183 @@ class ReminderPlugin(Star):
             f"🏷️ {matched.short_id}"
         )
 
+    @callme_group.command("every")
+    async def callme_every(self, event: AstrMessageEvent):
+        """创建循环提醒
+
+        用法: /callme every <周期> <时间> <事件>
+        周期: day(每天) / week(每周) / month(每月)
+
+        示例:
+        - /callme every day 9:00 晨会
+        - /callme every week 一 14:00 周报
+        - /callme every month 15 10:00 交房租
+        """
+        message = event.message_str.strip()
+
+        # 移除指令前缀
+        prefixes = ["/callme every", "callme every"]
+        for prefix in prefixes:
+            if message.lower().startswith(prefix):
+                message = message[len(prefix):].strip()
+                break
+
+        if not message:
+            yield event.plain_result(
+                "📌 循环提醒使用说明：\n\n"
+                "/callme every <周期> <时间> <事件>\n\n"
+                "周期类型：\n"
+                "• day - 每天\n"
+                "• week - 每周（后跟星期几）\n"
+                "• month - 每月（后跟几号）\n\n"
+                "示例：\n"
+                "• /callme every day 9:00 晨会\n"
+                "• /callme every week 一 14:00 周报\n"
+                "• /callme every month 15 10:00 交房租"
+            )
+            return
+
+        # 解析循环参数
+        parts = message.split(None, 3)  # 最多分割3次
+        if len(parts) < 3:
+            yield event.plain_result(
+                "❌ 参数不足\n\n"
+                "用法: /callme every <周期> <时间/日期> <事件>\n"
+                "示例: /callme every day 9:00 晨会"
+            )
+            return
+
+        recurrence_type = parts[0].lower()
+        recurrence_value = ""
+        recurrence_time = ""
+        event_content = ""
+
+        # 解析周期类型
+        if recurrence_type in ["day", "daily", "每天"]:
+            recurrence_type = "daily"
+            # /callme every day 9:00 事件
+            recurrence_time = parts[1]
+            event_content = parts[2] if len(parts) > 2 else ""
+        elif recurrence_type in ["week", "weekly", "每周"]:
+            recurrence_type = "weekly"
+            # /callme every week 一 14:00 事件
+            # 解析星期几
+            weekday_map = {
+                "一": "1", "1": "1", "周一": "1", "星期一": "1", "monday": "1", "mon": "1",
+                "二": "2", "2": "2", "周二": "2", "星期二": "2", "tuesday": "2", "tue": "2",
+                "三": "3", "3": "3", "周三": "3", "星期三": "3", "wednesday": "3", "wed": "3",
+                "四": "4", "4": "4", "周四": "4", "星期四": "4", "thursday": "4", "thu": "4",
+                "五": "5", "5": "5", "周五": "5", "星期五": "5", "friday": "5", "fri": "5",
+                "六": "6", "6": "6", "周六": "6", "星期六": "6", "saturday": "6", "sat": "6",
+                "日": "7", "天": "7", "7": "7", "周日": "7", "星期日": "7", "sunday": "7", "sun": "7",
+            }
+            recurrence_value = weekday_map.get(parts[1].lower(), "1")
+            recurrence_time = parts[2] if len(parts) > 2 else "09:00"
+            event_content = parts[3] if len(parts) > 3 else ""
+        elif recurrence_type in ["month", "monthly", "每月"]:
+            recurrence_type = "monthly"
+            # /callme every month 15 10:00 事件
+            recurrence_value = parts[1]  # 几号
+            recurrence_time = parts[2] if len(parts) > 2 else "09:00"
+            event_content = parts[3] if len(parts) > 3 else ""
+        else:
+            yield event.plain_result(
+                f"❌ 不支持的周期类型: {recurrence_type}\n\n"
+                "支持的周期：day(每天) / week(每周) / month(每月)"
+            )
+            return
+
+        if not event_content:
+            yield event.plain_result(
+                "❌ 请指定提醒事件\n\n"
+                "示例: /callme every day 9:00 晨会"
+            )
+            return
+
+        # 标准化时间格式
+        if not re.match(r'^\d{1,2}:\d{2}$', recurrence_time):
+            # 尝试解析其他格式
+            time_match = re.search(r'(\d{1,2})[点时:：](\d{0,2})', recurrence_time)
+            if time_match:
+                hour = time_match.group(1)
+                minute = time_match.group(2) or "00"
+                recurrence_time = f"{hour}:{minute.zfill(2)}"
+            else:
+                recurrence_time = "09:00"  # 默认早上9点
+
+        # 计算首次触发时间
+        now = datetime.now()
+        hour, minute = map(int, recurrence_time.split(':'))
+        
+        if recurrence_type == "daily":
+            # 每天：今天或明天
+            trigger_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if trigger_dt <= now:
+                trigger_dt += timedelta(days=1)
+        elif recurrence_type == "weekly":
+            # 每周：计算下个对应星期几
+            target_weekday = int(recurrence_value) - 1  # 转为 0-6
+            if target_weekday < 0:
+                target_weekday = 6
+            days_ahead = target_weekday - now.weekday()
+            if days_ahead < 0 or (days_ahead == 0 and now.hour * 60 + now.minute >= hour * 60 + minute):
+                days_ahead += 7
+            trigger_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            trigger_dt += timedelta(days=days_ahead)
+        elif recurrence_type == "monthly":
+            # 每月：计算下个对应日期
+            import calendar
+            target_day = int(recurrence_value)
+            trigger_dt = now.replace(day=min(target_day, calendar.monthrange(now.year, now.month)[1]),
+                                     hour=hour, minute=minute, second=0, microsecond=0)
+            if trigger_dt <= now:
+                # 推到下个月
+                if now.month == 12:
+                    trigger_dt = trigger_dt.replace(year=now.year + 1, month=1)
+                else:
+                    max_day = calendar.monthrange(now.year, now.month + 1)[1]
+                    trigger_dt = trigger_dt.replace(month=now.month + 1, day=min(target_day, max_day))
+
+        trigger_time = trigger_dt.timestamp()
+
+        # 构建 schedule_info
+        schedule_info = {
+            "time": trigger_dt.strftime("%Y-%m-%d %H:%M"),
+            "event": event_content,
+            "recurrence": recurrence_type,
+            "recurrence_time": recurrence_time,
+            "recurrence_value": recurrence_value,
+        }
+
+        # 检查是否有 @ 对象
+        target_id, target_name = self._get_at_target(event)
+        if target_id:
+            schedule_info["target_id"] = target_id
+            schedule_info["target_name"] = target_name
+
+        # 创建日程
+        result = await self._create_schedule(event, schedule_info, trigger_time)
+
+        if result["success"]:
+            schedule = result["schedule"]
+            recurrence_desc_map = {
+                "daily": "每天",
+                "weekly": f"每周{['一','二','三','四','五','六','日'][int(recurrence_value or '1')-1]}",
+                "monthly": f"每月{recurrence_value}号",
+            }
+            recurrence_desc = recurrence_desc_map.get(recurrence_type, "")
+            
+            yield event.plain_result(
+                f"✅ 循环提醒已创建\n"
+                f"─────────────\n"
+                f"📌 {event_content}\n"
+                f"🔁 {recurrence_desc} {recurrence_time}\n"
+                f"⏰ 首次: {trigger_dt.strftime('%m/%d %H:%M')}\n"
+                f"🏷️ {schedule.short_id}"
+            )
+        else:
+            yield event.plain_result(result["message"])
+
     @filter.command("callme", alias={"提醒我", "remind"})
     async def callme_quick(self, event: AstrMessageEvent):
         """快速创建提醒
@@ -623,9 +807,15 @@ class ReminderPlugin(Star):
     # ==================== 核心功能 ====================
 
     async def _create_schedule(
-        self, event: AstrMessageEvent, schedule_info: dict
+        self, event: AstrMessageEvent, schedule_info: dict, preset_trigger_time: float = None
     ) -> dict:
-        """创建日程"""
+        """创建日程
+        
+        Args:
+            event: 消息事件
+            schedule_info: 日程信息字典
+            preset_trigger_time: 预设的触发时间（用于循环日程命令）
+        """
         sender_id = event.get_sender_id()
 
         # 获取目标用户（如果是帮别人设置）
@@ -646,9 +836,12 @@ class ReminderPlugin(Star):
                 "message": f"您已达到最大提醒数量限制({max_reminders})，请先取消一些提醒再试。",
             }
 
-        # 解析时间
+        # 解析时间（如果没有预设则解析）
         time_str = schedule_info.get("time", "")
-        trigger_time = await self._parse_time_string(time_str, event)
+        if preset_trigger_time:
+            trigger_time = preset_trigger_time
+        else:
+            trigger_time = await self._parse_time_string(time_str, event)
 
         if trigger_time is None:
             return {
@@ -665,6 +858,11 @@ class ReminderPlugin(Star):
             self.db.get_next_short_id, sender_id
         )  # 从数据库获取短ID
 
+        # 获取循环日程信息
+        recurrence_type = schedule_info.get("recurrence", "none")
+        recurrence_value = schedule_info.get("recurrence_value", "")
+        recurrence_time = schedule_info.get("recurrence_time", "")
+
         # 创建日程对象
         schedule = ScheduleItem(
             id=schedule_id,
@@ -680,6 +878,10 @@ class ReminderPlugin(Star):
             search_info=schedule_info.get("search_info", ""),
             target_id=target_id,
             target_name=target_name,
+            recurrence_type=recurrence_type,
+            recurrence_value=recurrence_value,
+            recurrence_time=recurrence_time,
+            trigger_count=0,
         )
 
         # 保存到数据库（异步执行）
@@ -969,61 +1171,99 @@ class ReminderPlugin(Star):
         """生成日程确认回复"""
         time_str = schedule_info.get("time", "指定时间")
         event_content = schedule_info.get("event", "未知事件")
-        target_name = schedule_info.get("target_name", "您")
         target_id = schedule_info.get("target_id", "")
         sender_id = event.get_sender_id()
 
         is_self = target_id == sender_id or not target_id
 
-        if not self.config.get("enable_personality", True):
-            if is_self:
-                return f"✅ 好的，我会在{time_str}提醒您：{event_content}"
-            else:
-                return f"✅ 好的，我会在{time_str}提醒 @{target_name}：{event_content}"
+        # 获取用户昵称映射
+        sender_display = self._get_user_display_name(sender_id, event.get_sender_name())
+        target_display = self._get_user_display_name(
+            target_id, schedule_info.get("target_name", "TA")
+        ) if target_id else sender_display
 
-        # 获取人格设定
-        system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
-        if not system_prompt:
-            # 默认人设：少女哥伦比娅风格
-            system_prompt = "你说话语气绵软慵懒，语速舒缓，带着一丝漫不经心的疏离感，却又娇憨柔和。习惯带“哦~”、“呢”、“呀”等轻柔尾音。"
+        # 检查是否为循环日程
+        is_recurring = schedule_info.get("recurrence_type", "none") != "none"
+        recurrence_desc = ""
+        if is_recurring:
+            rec_type = schedule_info.get("recurrence_type", "")
+            if rec_type == "daily":
+                recurrence_desc = "每天"
+            elif rec_type == "weekly":
+                recurrence_desc = "每周"
+            elif rec_type == "monthly":
+                recurrence_desc = "每月"
+            elif rec_type == "yearly":
+                recurrence_desc = "每年"
+
+        if not self.config.get("enable_personality", True):
+            time_prefix = f"{recurrence_desc}" if recurrence_desc else ""
+            if is_self:
+                return f"✅ 好的，我会{time_prefix}在{time_str}提醒您：{event_content}"
+            else:
+                return f"✅ 好的，我会{time_prefix}在{time_str}提醒{target_display}：{event_content}"
+
+        # 获取人格设定（优先使用专用提醒人设）
+        use_dedicated_persona, persona_dict, max_length = self._get_reminder_persona()
+
+        if use_dedicated_persona and persona_dict:
+            # 使用专用提醒人设
+            system_prompt = self._build_persona_system_prompt(persona_dict)
+        else:
+            # 回退到系统人设
+            system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
+            if not system_prompt:
+                # 最终默认人设
+                system_prompt = "你说话语气绵软慵懒，语速舒缓，带着一丝漫不经心的疏离感，却又娇憨柔和。习惯带\"哦~\"、\"呢\"、\"呀\"等轻柔尾音。"
+            max_length = 50
 
         provider = await self._get_main_provider(event)
         if not provider:
-            return f"✅ 好的，我会在{time_str}提醒{'您' if is_self else target_name}：{event_content}"
+            time_prefix = f"{recurrence_desc}" if recurrence_desc else ""
+            return f"✅ 好的，我会{time_prefix}在{time_str}提醒{'你' if is_self else target_display}：{event_content}"
 
         target_rule = (
-            "请使用“你”来称呼，语气要贴心。"
+            "对用户使用\"你\"来称呼，语气要贴心。"
             if is_self
-            else f"禁止使用“你”，必须直呼其名“{target_name}”。"
+            else f"必须直呼其名\"{target_display}\"，禁止使用\"你\"。"
         )
 
-        prompt = f"""请根据你的人设生成一条日程确认消息。
+        prompt = f"""【任务】生成一条日程确认消息
 
-【当前人设】
+【你的人设】
 {system_prompt}
 
 【日程信息】
 - 提醒时间：{time_str}
 - 提醒事件：{event_content}
-- 提醒对象：{"用户自己" if is_self else target_name}
+- 提醒对象：{"用户自己（昵称：" + sender_display + "）" if is_self else "昵称：" + target_display}
 
-【交互规则】
-1. **必须明确告知“已经记下”**，一两句话结束，不要啰嗦。
-2. 关于对象称呼：{target_rule}
+【称呼规则】
+{target_rule}
 
-【绝对禁忌】
-- 严禁输出思考过程（<think>）。
-- 严禁使用“好的”、“收到”等客服式用语。
+【输出要求】
+1. 字数限制：整条回复不超过{max_length}字。
+2. 核心内容：必须明确表达\"已记下/记住了\"的意思。
+3. 直接输出：不要有任何前缀、解释或思考过程。
 
-请直接生成回复："""
+请直接输出回复内容："""
 
         try:
             response = await provider.text_chat(prompt=prompt)
             raw_text = response.completion_text.strip()
-            return self._clean_llm_response(raw_text)
+            cleaned = self._clean_llm_response(raw_text)
+            # 超长则使用兜底回复
+            if len(cleaned) > max_length + 30:
+                time_prefix = f"{recurrence_desc}" if recurrence_desc else ""
+                if is_self:
+                    return f"✅ 好的，我会{time_prefix}在{time_str}提醒你：{event_content}"
+                else:
+                    return f"✅ 好的，我会{time_prefix}在{time_str}提醒{target_display}：{event_content}"
+            return cleaned
         except Exception as e:
             logger.error(f"生成确认回复失败: {e}")
-            return f"✅ 好的，我会在{time_str}提醒您：{event_content}"
+            time_prefix = f"{recurrence_desc}" if recurrence_desc else ""
+            return f"✅ 好的，我会{time_prefix}在{time_str}提醒{'你' if is_self else target_display}：{event_content}"
 
     def _get_user_display_name(self, user_id: str, default_name: str) -> str:
         """获取用户显示名称（优先使用配置的别名）"""
@@ -1051,66 +1291,71 @@ class ReminderPlugin(Star):
         sender_display = self._get_user_display_name(
             schedule.sender_id, schedule.sender_name
         )
+        target_display = self._get_user_display_name(
+            schedule.target_id, schedule.target_name
+        ) if schedule.target_id else sender_display
 
         # 基础兜底回复
         base_reply = f"{schedule.event_content}的时间到了哦！"
         if not is_self_reminder:
-            base_reply = f"是{sender_display}让我来提醒你{schedule.event_content}的哦~"
+            base_reply = f"是{sender_display}拜托我提醒{target_display}{schedule.event_content}的哦~"
 
         if not self.config.get("enable_personality", True):
             return base_reply
 
-        # 获取人格设定
-        system_prompt = await self._get_persona_prompt(schedule.unified_msg_origin)
-        if not system_prompt:
-            # 默认人设：少女哥伦比娅风格
-            system_prompt = "你说话语气绵软慵懒，语速舒缓，带着一丝漫不经心的疏离感，却又娇憨柔和。习惯带“哦~”、“呢”、“呀”等轻柔尾音。"
+        # 获取人设配置（优先使用专用提醒人设）
+        use_dedicated_persona, persona_dict, max_length = self._get_reminder_persona()
+
+        if use_dedicated_persona and persona_dict:
+            # 使用专用提醒人设
+            system_prompt = self._build_persona_system_prompt(persona_dict)
+        else:
+            # 回退到系统人设
+            system_prompt = await self._get_persona_prompt(schedule.unified_msg_origin)
+            if not system_prompt:
+                # 最终默认人设
+                system_prompt = "你说话语气绵软慵懒，语速舒缓，带着一丝漫不经心的疏离感，却又娇憨柔和。习惯带\"哦~\"、\"呢\"、\"呀\"等轻柔尾音。"
+            max_length = 50
 
         provider = await self._get_main_provider_by_umo(schedule.unified_msg_origin)
         if not provider:
             return base_reply
 
-        # 构建动态规则
-        # 此时系统已经@了目标用户，所以直接对目标用户说话，称呼为“你”
+        # 构建场景与称呼规则
         if is_self_reminder:
-            context_rule = (
-                "场景：用户自己设了提醒。规则：直接对用户说话，"
-                '使用"你"称呼，不用提及"谁让我提醒"。'
-            )
+            scene_desc = f"这是{sender_display}自己设置的提醒。"
+            name_rule = f"对用户说话时使用\"你\"或直呼其昵称\"{sender_display}\"。"
         else:
-            context_rule = (
-                f"场景：{sender_display}委托来提醒当前用户。"
-                f"规则：自然地提及是{sender_display}让你来提醒的，"
-                '对当前用户使用"你"称呼。'
-            )
+            scene_desc = f"这是{sender_display}委托你提醒{target_display}的事项。"
+            name_rule = f"需要自然提及是{sender_display}托你来提醒的，对被提醒者使用\"你\"或其昵称\"{target_display}\"。"
 
-        prompt = f"""请生成一条日程提醒消息。
+        prompt = f"""【任务】生成一条日程提醒消息。
 
-【当前人设】
+【你的人设】
 {system_prompt}
 
-【提醒信息】
-- 事项：{schedule.event_content}
-- {context_rule}
+【提醒事项】
+{schedule.event_content}
 
-【交互规则】
-1. **极致简短**：除去事项内容，你的发挥空间仅限30字以内。
-2. **拒绝机械**：禁止说"系统提醒"、"时间到了"等生硬词汇，要自然流畅，像朋友间的提醒。
-3. **句式参考**（灵活发挥，不要照搬）：
-   - （自己提醒）"嗯~ 该去{schedule.event_content}啦~"、"喂喂，你不是要{schedule.event_content}吗~"
-   - （他人提醒）"是{sender_display}让我来喊你{schedule.event_content}的呢~"、"{sender_display}托我提醒你{schedule.event_content}哦~"
+【场景说明】
+{scene_desc}
 
-【绝对禁忌】
-- 严禁输出思考过程（<think>）。
-- 严禁出现与日程无关的闲聊。
+【称呼规则】
+{name_rule}
 
-请直接生成回复："""
+【输出要求】
+1. 字数限制：整条回复不超过{max_length}字（含事项内容）。
+2. 语气自然：像朋友间的提醒，禁止"系统提醒"、"时间到了"等机械用语。
+3. 直接输出：不要有任何前缀、解释或思考过程。
+
+请直接输出回复内容："""
 
         try:
             response = await provider.text_chat(prompt=prompt)
             raw_text = response.completion_text.strip()
             cleaned_text = self._clean_llm_response(raw_text)
-            if len(cleaned_text) > 100:
+            # 超长则使用兜底回复
+            if len(cleaned_text) > max_length + 20:
                 return base_reply
             return cleaned_text
         except Exception as e:
@@ -1187,6 +1432,62 @@ class ReminderPlugin(Star):
         if detection_provider_id:
             return self.context.get_provider_by_id(detection_provider_id)
         return await self._get_main_provider(event)
+
+    def _get_reminder_persona(self) -> tuple[bool, dict, int]:
+        """获取提醒人设配置
+
+        返回值：(是否启用, 人设字典, 最大字数)
+        人设字典包含: name, character_setting, event_handling, content_control, max_length, user_alias_requirement
+        """
+        reminder_persona_config = self.config.get("reminder_persona", {})
+
+        # 检查是否启用
+        enabled = reminder_persona_config.get("enabled", False)
+        if not enabled:
+            return False, None, 50
+
+        # 获取当前活跃人设名称
+        active_persona_name = reminder_persona_config.get("active_persona_name", "哥伦比娅")
+
+        # 从人设库中查找对应的人设
+        persona_list = self.config.get("reminder_persona_list", [])
+        for persona in persona_list:
+            if isinstance(persona, dict) and persona.get("name") == active_persona_name:
+                max_length = persona.get("max_length", 50)
+                return True, persona, max_length
+
+        # 如果未找到指定的人设，返回禁用状态
+        logger.warning(f"未找到人设'{active_persona_name}'，已禁用提醒人设功能")
+        return False, None, 50
+
+    def _build_persona_system_prompt(self, persona: dict) -> str:
+        """根据人设配置构建完整的系统提示词
+
+        参数：
+            persona: 人设字典，包含各项配置
+
+        返回值：完整的系统提示词
+        """
+        if not persona or not isinstance(persona, dict):
+            return ""
+
+        character_setting = persona.get("character_setting", "")
+        event_handling = persona.get("event_handling", "")
+        content_control = persona.get("content_control", "")
+        user_alias_requirement = persona.get("user_alias_requirement", "")
+
+        prompt = f"""{character_setting}
+
+【事件处理方式】
+{event_handling}
+
+【内容生成约束】
+{content_control}
+
+【用户昵称使用约束】
+{user_alias_requirement}"""
+
+        return prompt
 
     async def _get_persona_prompt(self, umo: str) -> str:
         """获取人格设定提示词"""
