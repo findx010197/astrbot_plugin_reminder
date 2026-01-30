@@ -182,10 +182,6 @@ class ScheduleDatabase:
                 CREATE INDEX IF NOT EXISTS idx_schedules_short_id 
                 ON schedules(short_id)
             """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_schedules_recurrence 
-                ON schedules(recurrence_type)
-            """)
 
             # 创建ID计数器表
             cursor.execute("""
@@ -203,51 +199,49 @@ class ScheduleDatabase:
                 )
             """)
 
-            # 记录数据库版本
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO metadata (key, value) VALUES ('db_version', ?)
-            """,
-                (str(self.DB_VERSION),),
-            )
-
     def _migrate_database(self):
         """执行数据库迁移"""
         with self._get_cursor() as cursor:
-            # 检查当前版本
-            cursor.execute("SELECT value FROM metadata WHERE key = 'db_version'")
-            row = cursor.fetchone()
-            current_version = int(row[0]) if row else 1
+            # 检查当前表结构
+            cursor.execute("PRAGMA table_info(schedules)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            # 无论版本号如何，只要缺列就补全（健壮性修复）
+            logger.info(f"检查数据库结构，当前列: {columns}")
 
-            # 迁移到版本 2：添加循环日程字段
-            if current_version < 2:
-                logger.info("执行数据库迁移：添加循环日程支持...")
-                # 检查列是否存在，如果不存在则添加
-                cursor.execute("PRAGMA table_info(schedules)")
-                columns = [col[1] for col in cursor.fetchall()]
-
-                if "recurrence_type" not in columns:
-                    cursor.execute(
-                        "ALTER TABLE schedules ADD COLUMN recurrence_type TEXT DEFAULT 'none'"
-                    )
-                if "recurrence_value" not in columns:
-                    cursor.execute(
-                        "ALTER TABLE schedules ADD COLUMN recurrence_value TEXT DEFAULT ''"
-                    )
-                if "recurrence_time" not in columns:
-                    cursor.execute(
-                        "ALTER TABLE schedules ADD COLUMN recurrence_time TEXT DEFAULT ''"
-                    )
-                if "trigger_count" not in columns:
-                    cursor.execute(
-                        "ALTER TABLE schedules ADD COLUMN trigger_count INTEGER DEFAULT 0"
-                    )
-
-                # 更新版本号
+            if "recurrence_type" not in columns:
+                logger.info("执行数据库迁移：添加 recurrence_type")
                 cursor.execute(
-                    "INSERT OR REPLACE INTO metadata (key, value) VALUES ('db_version', '2')"
+                    "ALTER TABLE schedules ADD COLUMN recurrence_type TEXT DEFAULT 'none'"
                 )
-                logger.info("数据库迁移完成：版本 2")
+            if "recurrence_value" not in columns:
+                logger.info("执行数据库迁移：添加 recurrence_value")
+                cursor.execute(
+                    "ALTER TABLE schedules ADD COLUMN recurrence_value TEXT DEFAULT ''"
+                )
+            if "recurrence_time" not in columns:
+                logger.info("执行数据库迁移：添加 recurrence_time")
+                cursor.execute(
+                    "ALTER TABLE schedules ADD COLUMN recurrence_time TEXT DEFAULT ''"
+                )
+            if "trigger_count" not in columns:
+                logger.info("执行数据库迁移：添加 trigger_count")
+                cursor.execute(
+                    "ALTER TABLE schedules ADD COLUMN trigger_count INTEGER DEFAULT 0"
+                )
+
+            # 确保索引存在（移到这里创建，确保列已存在）
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_schedules_recurrence 
+                ON schedules(recurrence_type)
+            """)
+
+            # 更新版本号到最新
+            cursor.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('db_version', ?)",
+                (str(self.DB_VERSION),),
+            )
+            logger.info(f"数据库结构检查完成，当前版本: {self.DB_VERSION}")
 
     # ==================== 日程 CRUD 操作 ====================
 
