@@ -35,7 +35,7 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_
     "astrbot_plugin_reminder",
     "findx010197",
     "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳",
-    "3.0.0",
+    "3.1.0",
     "https://github.com/findx010197/astrbot_plugin_reminder",
 )
 class ReminderPlugin(Star):
