@@ -23,18 +23,19 @@ from .database import (
     ScheduleDatabase,
     ScheduleItem,
     ReminderStatus,
+    RecurrenceType,
     migrate_from_json,
 )
 
 # 用于数据库操作的线程池执行器
-_db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="db_")
+_db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="db_")
 
 
 @register(
     "astrbot_plugin_reminder",
     "findx010197",
     "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳",
-    "2.2.1",
+    "3.0.0",
     "https://github.com/findx010197/astrbot_plugin_reminder",
 )
 class ReminderPlugin(Star):
@@ -188,7 +189,6 @@ class ReminderPlugin(Star):
 
         # 第一步：使用 LLM 进一步确认是否为日程设定请求（带超时）
         try:
-            start_ts = time.time()
             is_trigger = await asyncio.wait_for(
                 self._is_schedule_trigger(message_str, event),
                 timeout=10.0  # 10秒超时
@@ -370,7 +370,7 @@ class ReminderPlugin(Star):
 只需回复"是"或"否"，不要包含其他内容。"""
 
         try:
-            response = await self._provider_text_chat(provider, prompt, timeout=10.0)
+            response = await provider.text_chat(prompt=prompt)
             result = response.completion_text.strip().lower()
             return result in ["是", "是的", "yes", "true"]
         except Exception as e:
@@ -410,7 +410,7 @@ class ReminderPlugin(Star):
 }}"""
 
         try:
-            response = await self._provider_text_chat(provider, prompt, timeout=12.0)
+            response = await provider.text_chat(prompt=prompt)
             result_text = response.completion_text.strip()
 
             # 尝试提取JSON
@@ -986,51 +986,58 @@ class ReminderPlugin(Star):
                 f"TTS Provider {type(tts_provider).__name__} methods: {dir(tts_provider)}"
             )
 
-            # 生成语音：使用安全封装调用可能的接口（按优先级）
+            # 生成语音
+            # AstrBot TTS Provider 标准接口为 get_audio(text)，返回音频文件路径
             audio_path = None
+            if hasattr(tts_provider, "get_audio"):
+                try:
+                    audio_path = await tts_provider.get_audio(message)
+                except Exception as e:
+                    logger.error(f"调用 TTS Provider.get_audio 失败: {e}")
+                    return
+            # 兼容性尝试：某些旧插件可能使用其他名称
+            elif hasattr(tts_provider, "generate_voice"):
+                # ... (保留旧逻辑作为 fallback，但主要依赖 get_audio)
+                try:
+                    ret = await tts_provider.generate_voice(message)
+                    if ret:
+                        # 如果返回二进制数据，需要手动保存
+                        if isinstance(ret, bytes):
+                            temp_path = (
+                                self.data_dir
+                                / f"tts_{schedule.id}_{int(time.time())}.wav"
+                            )
+                            with open(temp_path, "wb") as f:
+                                f.write(ret)
+                            audio_path = str(temp_path)
+                        # 如果返回对象
+                        elif hasattr(ret, "audio_content"):
+                            temp_path = (
+                                self.data_dir
+                                / f"tts_{schedule.id}_{int(time.time())}.wav"
+                            )
+                            with open(temp_path, "wb") as f:
+                                f.write(ret.audio_content)
+                            audio_path = str(temp_path)
+                except Exception:
+                    pass
 
-            # 1) 尝试标准接口 get_audio，期望返回文件路径或 None
-            resp = await self._provider_audio_call(tts_provider, ["get_audio"], message, timeout=8.0)
-            if isinstance(resp, str) and os.path.exists(resp):
-                audio_path = resp
-            elif isinstance(resp, bytes):
-                filename = f"tts_{schedule.id}_{int(time.time())}.wav"
-                temp_path = os.path.join(self.data_dir, filename)
-                with open(temp_path, "wb") as f:
-                    f.write(resp)
-                audio_path = temp_path
-
-            # 2) 兼容旧接口 generate_voice
             if not audio_path:
-                resp = await self._provider_audio_call(tts_provider, ["generate_voice"], message, timeout=10.0)
-                if isinstance(resp, str) and os.path.exists(resp):
-                    audio_path = resp
-                elif isinstance(resp, bytes):
-                    filename = f"tts_{schedule.id}_{int(time.time())}.wav"
-                    temp_path = os.path.join(self.data_dir, filename)
-                    with open(temp_path, "wb") as f:
-                        f.write(resp)
-                    audio_path = temp_path
-                elif hasattr(resp, "audio_content"):
-                    audio_blob = getattr(resp, "audio_content")
-                    if isinstance(audio_blob, bytes):
-                        filename = f"tts_{schedule.id}_{int(time.time())}.wav"
-                        temp_path = os.path.join(self.data_dir, filename)
-                        with open(temp_path, "wb") as f:
-                            f.write(audio_blob)
-                        audio_path = temp_path
-
-            # 3) 最后尝试 text_to_speech
-            if not audio_path:
-                resp = await self._provider_audio_call(tts_provider, ["text_to_speech"], message, timeout=10.0)
-                if isinstance(resp, str) and os.path.exists(resp):
-                    audio_path = resp
-                elif isinstance(resp, bytes):
-                    filename = f"tts_{schedule.id}_{int(time.time())}.wav"
-                    temp_path = os.path.join(self.data_dir, filename)
-                    with open(temp_path, "wb") as f:
-                        f.write(resp)
-                    audio_path = temp_path
+                # 再次尝试 text_to_speech
+                if hasattr(tts_provider, "text_to_speech"):
+                    try:
+                        audio_data = await tts_provider.text_to_speech(message)
+                        # ... (同上，二进制保存逻辑)
+                        if isinstance(audio_data, bytes):
+                            temp_path = (
+                                self.data_dir
+                                / f"tts_{schedule.id}_{int(time.time())}.wav"
+                            )
+                            with open(temp_path, "wb") as f:
+                                f.write(audio_data)
+                            audio_path = str(temp_path)
+                    except Exception:
+                        pass
 
             if audio_path and os.path.exists(audio_path):
                 # 发送语音消息
@@ -1129,7 +1136,7 @@ class ReminderPlugin(Star):
 请直接返回格式化的时间字符串（YYYY-MM-DD HH:MM:SS），不要包含其他内容。如果无法解析，返回"无法解析"。"""
 
         try:
-            response = await self._provider_text_chat(provider, prompt, timeout=12.0)
+            response = await provider.text_chat(prompt=prompt)
             result = response.completion_text.strip()
 
             if "无法解析" in result:
@@ -1192,7 +1199,7 @@ class ReminderPlugin(Star):
         if not self.config.get("enable_personality", True):
             time_prefix = f"{recurrence_desc}" if recurrence_desc else ""
             if is_self:
-                return f"✅ 好的，我会{time_prefix}在{time_str}提醒你：{event_content}"
+                return f"✅ 好的，我会{time_prefix}在{time_str}提醒您：{event_content}"
             else:
                 return f"✅ 好的，我会{time_prefix}在{time_str}提醒{target_display}：{event_content}"
 
@@ -1242,7 +1249,7 @@ class ReminderPlugin(Star):
 请直接输出回复内容："""
 
         try:
-            response = await self._provider_text_chat(provider, prompt, timeout=10.0)
+            response = await provider.text_chat(prompt=prompt)
             raw_text = response.completion_text.strip()
             cleaned = self._clean_llm_response(raw_text)
             # 超长则使用兜底回复
@@ -1344,7 +1351,7 @@ class ReminderPlugin(Star):
 请直接输出回复内容："""
 
         try:
-            response = await self._provider_text_chat(provider, prompt, timeout=10.0)
+            response = await provider.text_chat(prompt=prompt)
             raw_text = response.completion_text.strip()
             cleaned_text = self._clean_llm_response(raw_text)
             # 超长则使用兜底回复
@@ -1377,8 +1384,8 @@ class ReminderPlugin(Star):
 如果不需要，回复"不需要"
 """
 
-            response = await self._provider_text_chat(provider, judge_prompt, timeout=6.0)
-            result = response.completion_text.strip() if response else "不需要"
+            response = await provider.text_chat(prompt=judge_prompt)
+            result = response.completion_text.strip()
 
             if "不需要" in result:
                 return ""
@@ -1425,120 +1432,6 @@ class ReminderPlugin(Star):
         if detection_provider_id:
             return self.context.get_provider_by_id(detection_provider_id)
         return await self._get_main_provider(event)
-
-    async def _provider_text_chat(self, provider, prompt: str, timeout: float = 10.0):
-        """安全调用 provider.text_chat 的封装。
-
-        - 如果 provider.text_chat 是协程函数，则直接 await；
-        - 如果是同步函数，则在线程中执行以避免阻塞事件循环；
-        - 支持通过 timeout 限制总时长。
-        返回 provider 返回的对象（或 None 在出错时）。
-        """
-        if not provider:
-            return None
-
-        text_chat = getattr(provider, "text_chat", None)
-        if not text_chat:
-            return None
-
-        try:
-            # 协程函数（异步）
-            if asyncio.iscoroutinefunction(text_chat):
-                try:
-                    coro = text_chat(prompt=prompt)
-                except TypeError:
-                    coro = text_chat(prompt)
-                if timeout:
-                    resp = await asyncio.wait_for(coro, timeout=timeout)
-                else:
-                    resp = await coro
-                elapsed = time.time() - start_ts
-                logger.debug(f"provider.text_chat elapsed={elapsed:.3f}s (async)")
-                return resp
-
-            # 同步函数，放入线程执行，避免阻塞事件循环
-            def _call_sync():
-                try:
-                    # 一些实现接受关键字参数，有些只接受位置参数
-                    try:
-                        return text_chat(prompt=prompt)
-                    except TypeError:
-                        return text_chat(prompt)
-                except Exception as e:
-                    raise
-
-            if timeout:
-                resp = await asyncio.wait_for(asyncio.to_thread(_call_sync), timeout=timeout)
-            else:
-                resp = await asyncio.to_thread(_call_sync)
-            elapsed = time.time() - start_ts
-            logger.debug(f"provider.text_chat elapsed={elapsed:.3f}s (sync)")
-            return resp
-
-        except asyncio.TimeoutError:
-            logger.warning(f"LLM 调用超时 ({timeout}s)")
-            return None
-        except Exception as e:
-            logger.error(f"调用 provider.text_chat 失败: {e}")
-            return None
-
-    async def _provider_audio_call(self, provider, method_names: list, message: str, timeout: float = 10.0):
-        """安全调用 TTS provider 的音频接口（get_audio/generate_voice/text_to_speech）。
-
-        method_names: 按优先级排列的方法名列表，遇到第一个存在的方法即调用。
-        返回值原样返回（可能为文件路径、bytes、或包含音频字段的对象）。
-        """
-        if not provider:
-            return None
-
-        method = None
-        for name in method_names:
-            if hasattr(provider, name):
-                method = getattr(provider, name)
-                method_name = name
-                break
-
-        if not method:
-            return None
-
-        start_ts = time.time()
-        try:
-            if asyncio.iscoroutinefunction(method):
-                try:
-                    coro = method(message=message)
-                except TypeError:
-                    coro = method(message)
-                if timeout:
-                    resp = await asyncio.wait_for(coro, timeout=timeout)
-                else:
-                    resp = await coro
-                elapsed = time.time() - start_ts
-                logger.debug(f"TTS provider.{method_name} elapsed={elapsed:.3f}s (async)")
-                return resp
-
-            def _call_sync():
-                try:
-                    try:
-                        return method(message=message)
-                    except TypeError:
-                        return method(message)
-                except Exception:
-                    raise
-
-            if timeout:
-                resp = await asyncio.wait_for(asyncio.to_thread(_call_sync), timeout=timeout)
-            else:
-                resp = await asyncio.to_thread(_call_sync)
-            elapsed = time.time() - start_ts
-            logger.debug(f"TTS provider.{method_name} elapsed={elapsed:.3f}s (sync)")
-            return resp
-
-        except asyncio.TimeoutError:
-            logger.warning(f"TTS 调用超时 ({timeout}s) 方法={method_name}")
-            return None
-        except Exception as e:
-            logger.error(f"调用 TTS provider 方法失败: {e}")
-            return None
 
     def _get_reminder_persona(self) -> tuple[bool, dict, int]:
         """获取提醒人设配置
