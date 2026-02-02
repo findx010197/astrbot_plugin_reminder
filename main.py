@@ -340,8 +340,8 @@ class ReminderPlugin(Star):
 
         # 1. 去除 <think>...</think> 标签及其内容
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        # 去除 [Thinking] 等变体
-        text = re.sub(r"\[.*?\]", "", text, flags=re.DOTALL)
+        # 仅去除特定的思考标签（不使用通配符以避免误删有效内容）
+        text = re.sub(r"\[(?:Thinking|思考中|分析中|正在思考).*?\]", "", text, flags=re.DOTALL)
 
         # 2. 去除 Markdown 代码块标记（如果有）
         text = re.sub(r"^```.*?\n", "", text)
@@ -995,11 +995,18 @@ class ReminderPlugin(Star):
         """
         sender_id = event.get_sender_id()
 
+        # 获取发送者昵称（优先使用配置的昵称映射）
+        sender_name = self._get_user_display_name(sender_id, event.get_sender_name())
+
         # 获取目标用户（如果是帮别人设置）
         target_id = schedule_info.get("target_id", sender_id)
-        target_name = schedule_info.get("target_name", event.get_sender_name())
-        if target_id == sender_id:  # 如果相等，说明是自己，修正名称
-            target_name = event.get_sender_name()
+        if target_id == sender_id:
+            # 提醒自己，使用发送者昵称
+            target_name = sender_name
+        else:
+            # 提醒别人，获取目标用户昵称（优先使用配置的昵称映射）
+            default_target_name = schedule_info.get("target_name", event.get_sender_name())
+            target_name = self._get_user_display_name(target_id, default_target_name)
 
         # 检查数量限制（异步执行）
         max_reminders = self.config.get("max_reminders", 20)
@@ -1046,7 +1053,7 @@ class ReminderPlugin(Star):
             short_id=short_id,
             unified_msg_origin=event.unified_msg_origin,
             sender_id=sender_id,
-            sender_name=event.get_sender_name(),
+            sender_name=sender_name,  # 使用配置的昵称映射
             event_content=schedule_info.get("event", "未知事件"),
             trigger_time=trigger_time,
             created_at=time.time(),

@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v3.3.1] - 2026-02-02
+
+### Fixed
+- **修复昵称映射未生效**：
+  - `_create_schedule` 方法现在正确使用 `_get_user_display_name` 获取配置的昵称
+  - 修复了LLM生成的回复文本中依旧使用群内用户名的问题
+  - 确保 `sender_name` 和 `target_name` 都优先使用配置的昵称映射
+- **修复文本清理BUG**：
+  - `_clean_llm_response` 中的正则表达式 `\[.*?\]` 过于宽泛
+  - 修改为仅匹配特定思考标签：`\[(?:Thinking|思考中|分析中|正在思考).*?\]`
+  - 避免误删有效内容导致的文本损坏问题
+
+### Improved
+- **调试日志优化**：
+  - `_get_user_display_name` 方法增加详细日志
+  - 记录每次昵称查找的结果（配置昵称 vs 默认名称）
+
 ## [v3.3.0] - 2026-02-02
 
 ### Changed
