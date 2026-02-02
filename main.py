@@ -265,13 +265,21 @@ class ReminderPlugin(Star):
 
         # 检查是否有 @ 对象
         logger.info(f"[LLM监控模式] 步骤3: 检查@对象...")
-        target_id, target_name = await self._get_at_target(event)
-        if target_id:
-            logger.info(f"[LLM监控模式] 找到@对象: {target_name} ({target_id})")
-            schedule_info["target_id"] = target_id
-            schedule_info["target_name"] = target_name
-        else:
-            logger.info(f"[LLM监控模式] 未找到@对象，默认为自己")
+        try:
+            target_id, target_name = await asyncio.wait_for(
+                self._get_at_target(event),
+                timeout=10.0  # 10秒超时
+            )
+            if target_id:
+                logger.info(f"[LLM监控模式] 找到@对象: {target_name} ({target_id})")
+                schedule_info["target_id"] = target_id
+                schedule_info["target_name"] = target_name
+            else:
+                logger.info(f"[LLM监控模式] 未找到@对象，默认为自己")
+        except asyncio.TimeoutError:
+            logger.warning(f"[LLM监控模式] 获取@对象超时，默认为自己")
+        except Exception as e:
+            logger.error(f"[LLM监控模式] 获取@对象异常: {e}", exc_info=True)
 
         # 第三步：创建日程（带超时）
         logger.info(f"[LLM监控模式] 步骤4: 开始创建日程...")
@@ -1165,21 +1173,25 @@ class ReminderPlugin(Star):
             logger.error(f"计算下次触发时间失败: {e}")
             return None
 
-    async def _send_poke(self, unified_msg_origin: str, target_id: str):
-        """发送戳一戳
+    async def _send_poke_reminder(self, schedule: ScheduleItem):
+        """发送戳一戳提醒（参考pokepro插件实现）
         
         Args:
-            unified_msg_origin: 统一消息来源标识
-            target_id: 目标用户ID
+            schedule: 日程项目，包含unified_msg_origin和target_id
         """
-        from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-        
         try:
+            umo = schedule.unified_msg_origin
+            target_id = schedule.target_id
+            
+            if not target_id:
+                logger.debug("没有目标用户ID，跳过戳一戳")
+                return
+            
             # 从unified_msg_origin解析平台信息
             # 格式: platform_name:message_type:session_id
-            parts = unified_msg_origin.split(":")
+            parts = umo.split(":")
             if len(parts) < 3:
-                logger.warning(f"无效的unified_msg_origin格式: {unified_msg_origin}")
+                logger.warning(f"无效的unified_msg_origin格式: {umo}")
                 return
             
             platform_name = parts[0]
@@ -1198,28 +1210,31 @@ class ReminderPlugin(Star):
                 logger.warning("未找到aiocqhttp平台实例")
                 return
             
-            # 获取bot实例（需要从platform中获取）
-            # 这里有个问题：我们没有event对象，无法直接访问bot
-            # 需要通过platform的client来调用API
+            # 获取client（参考pokepro的实现）
+            client = None
+            if hasattr(platform, 'get_client'):
+                client = platform.get_client()
+            elif hasattr(platform, 'client'):
+                client = platform.client
+            
+            if not client:
+                logger.warning("无法获取aiocqhttp客户端实例")
+                return
             
             # 检查是否为群聊
             is_group = message_type == "group"
             
             if is_group:
-                # 群戳一戳
-                # session_id就是group_id
+                # 群戳一戳（参考pokepro: await client.group_poke(group_id=int(group_id), user_id=tid)）
                 group_id = session_id
-                # platform.get_client() 可能需要根据具体实现调整
-                # 暂时记录日志，实际调用需要测试
-                logger.info(f"准备发送群戳一戳: group={group_id}, user={target_id}")
-                # await platform.get_client().api.call_action('group_poke', group_id=group_id, user_id=int(target_id))
+                logger.info(f"发送群戳一戳: group={group_id}, user={target_id}")
+                await client.group_poke(group_id=int(group_id), user_id=int(target_id))
             else:
-                # 私聊戳一戳
-                logger.info(f"准备发送私聊戳一戳: user={target_id}")
-                # await platform.get_client().api.call_action('friend_poke', user_id=int(target_id))
+                # 私聊戳一戳（参考pokepro: await client.friend_poke(user_id=tid)）
+                logger.info(f"发送私聊戳一戳: user={target_id}")
+                await client.friend_poke(user_id=int(target_id))
             
-            # TODO: 完善bot实例获取逻辑
-            logger.warning("戳一戳功能尚未完全实现，需要进一步测试和完善")
+            logger.info(f"戳一戳发送成功: target={target_id}")
             
         except Exception as e:
             logger.error(f"发送戳一戳失败: {e}", exc_info=True)
@@ -1235,7 +1250,7 @@ class ReminderPlugin(Star):
             # ===== 步骤1: 戳一戳提醒对象 =====
             if schedule.target_id and self.config.get("enable_poke", True):
                 logger.info(f"发送戳一戳: target={schedule.target_id}")
-                await self._send_poke(umo, schedule.target_id)
+                await self._send_poke_reminder(schedule)
                 # 戳一戳后稍微延迟一下，避免消息发送过快
                 await asyncio.sleep(0.5)
 

@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v3.2.4] - 2026-02-02
+
+### Fixed
+- **戳一戳功能完善**：
+  - 修复v3.2.3中戳一戳API调用被注释（TODO标记）导致功能未实际生效的问题
+  - 参考[pokepro插件](https://github.com/Zhalslar/astrbot_plugin_pokepro)重构实现
+  - 重构方法名：`_send_poke(umo, target_id)` → `_send_poke_reminder(schedule)`
+  - 使用正确的client获取方式：`platform.get_client()` 或 `platform.client`
+  - 实现真正的API调用：`await client.group_poke()` 和 `await client.friend_poke()`
+  
+- **LLM监控超时修复**：
+  - 修复建立提醒别人类日程时LLM监控超时的问题
+  - 根本原因：`_get_at_target()` 调用未添加超时保护，获取群成员列表时可能较慢
+  - 解决方案：为 `_get_at_target()` 添加10秒超时保护（`asyncio.wait_for`）
+  - 超时时默认为提醒自己，避免阻塞整个流程
+  - 添加详细的异常处理和日志记录
+  
+### Verified
+- **成员昵称映射功能**：
+  - 经代码审查确认该功能已在v3.2.3及之前版本中正常实现
+  - `_get_user_display_name()` 方法在 `_generate_reminder_message()` 和 `_generate_confirmation_response()` 中被正确调用
+  - 配置格式：`user_alias: ["用户ID,称呼"]`（按逗号分隔，只分割第一个逗号）
+  - 优先使用配置的别名，未配置则使用从API获取的真实昵称
+
+### Technical Details
+- 超时策略：判断请求(10s) → 提取信息(15s) → **获取@对象(10s)** → 创建日程(20s) → 生成回复(10s)
+- 支持群聊和私聊环境的戳一戳功能
+- 仅aiocqhttp平台支持戳一戳，其他平台自动跳过
+
+---
+
 ## [v3.2.3] - 2026-02-02
 
 ### Fixed
