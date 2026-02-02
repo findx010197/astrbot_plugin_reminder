@@ -36,8 +36,8 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_
 @register(
     "astrbot_plugin_reminder",
     "findx010197",
-    "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳，集成uni_nickname昵称映射",
-    "3.2.7",
+    "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳",
+    "3.3.0",
     "https://github.com/findx010197/astrbot_plugin_reminder",
 )
 class ReminderPlugin(Star):
@@ -72,89 +72,32 @@ class ReminderPlugin(Star):
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(_db_executor, lambda: func(*args, **kwargs))
     
-    def _get_uni_nickname_mappings(self) -> dict:
-        """获取uni_nickname插件的昵称映射（QQ号→昵称）
-        
-        返回格式: {"123456789": "小龙", "987654321": "小王"}
-        """
-        try:
-            # 尝试从其他插件获取配置
-            # uni_nickname插件的配置在 context 中的插件配置里
-            # 配置格式: ["用户ID,昵称", ...]
-            uni_config = None
-            
-            # 方法1：通过context访问其他插件配置
-            logger.debug(f"[昵称映射] 尝试方法1: context.get_plugin_config")
-            if hasattr(self.context, 'get_plugin_config'):
-                try:
-                    uni_config = self.context.get_plugin_config('uni_nickname')
-                    if uni_config:
-                        logger.info(f"[昵称映射] ✓ 方法1成功，读取到配置: {list(uni_config.keys())}")
-                    else:
-                        logger.debug(f"[昵称映射] 方法1返回空")
-                except Exception as e:
-                    logger.debug(f"[昵称映射] 方法1失败: {e}")
-            else:
-                logger.debug(f"[昵称映射] context没有get_plugin_config方法")
-            
-            # 方法2：直接读取配置文件
-            if not uni_config:
-                logger.debug(f"[昵称映射] 尝试方法2: 读取配置文件")
-                config_path = os.path.join("data", "config", "uni_nickname.json")
-                logger.debug(f"[昵称映射] 配置文件路径: {config_path}")
-                if os.path.exists(config_path):
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        uni_config = json.load(f)
-                    logger.info(f"[昵称映射] ✓ 方法2成功，读取到配置: {list(uni_config.keys())}")
-                else:
-                    logger.warning(f"[昵称映射] ✗ 配置文件不存在: {config_path}")
-            
-            if not uni_config:
-                logger.warning("[昵称映射] ⚠️ 未找到uni_nickname插件配置（两种方法都失败）")
-                return {}
-            
-            # 解析映射列表
-            mappings = {}
-            mapping_list = uni_config.get("nickname_mappings", [])
-            logger.debug(f"[昵称映射] 原始映射列表: {mapping_list}")
-            
-            for item in mapping_list:
-                if not isinstance(item, str) or "," not in item:
-                    continue
-                parts = item.split(",", 1)
-                if len(parts) == 2:
-                    user_id = parts[0].strip()
-                    nickname = parts[1].strip()
-                    if user_id and nickname:
-                        mappings[user_id] = nickname
-            
-            logger.info(f"[昵称映射] ✓ 成功加载 {len(mappings)} 个昵称映射: {mappings}")
-            return mappings
-            
-        except Exception as e:
-            logger.error(f"[昵称映射] ✗ 获取uni_nickname配置失败: {e}", exc_info=True)
-            return {}
-    
-    def _get_userid_by_nickname(self, nickname: str) -> Optional[str]:
-        """根据昵称查找用户ID（反向查询）
+    def _get_user_display_name(self, user_id: str, default_name: str) -> str:
+        """获取用户显示昵称
         
         Args:
-            nickname: 用户昵称
+            user_id: 用户QQ号
+            default_name: 默认名称（从平台获取的名称）
         
         Returns:
-            用户QQ号，未找到则返回None
+            用户昵称
         """
-        mappings = self._get_uni_nickname_mappings()
+        # 从配置中读取昵称映射
+        user_alias_list = self.config.get("user_alias", [])
         
-        logger.debug(f"[昵称反查] 查找昵称: '{nickname}', 可用映射: {mappings}")
+        for item in user_alias_list:
+            if not isinstance(item, str) or "," not in item:
+                continue
+            parts = item.split(",", 1)
+            if len(parts) == 2:
+                uid = parts[0].strip()
+                alias = parts[1].strip()
+                if uid == str(user_id) and alias:
+                    logger.debug(f"[用户昵称] 用户{user_id}使用配置昵称: '{alias}'")
+                    return alias
         
-        for user_id, nick in mappings.items():
-            if nick == nickname:
-                logger.info(f"[昵称反查] ✓ 找到匹配: '{nickname}' → {user_id}")
-                return user_id
-        
-        logger.warning(f"[昵称反查] ✗ 未找到匹配: '{nickname}'")
-        return None
+        logger.debug(f"[用户昵称] 用户{user_id}使用默认名称: '{default_name}'")
+        return default_name
 
     async def _restore_timers(self):
         """从数据库恢复定时任务"""
@@ -372,39 +315,11 @@ class ReminderPlugin(Star):
             event.stop_event()
             return
 
-        # 检查是否有 @ 对象
-        logger.info(f"[LLM监控模式] 步骤3: 检查@对象...")
-        try:
-            target_id, target_name = await asyncio.wait_for(
-                self._get_at_target(event),
-                timeout=10.0  # 10秒超时
-            )
-            if target_id:
-                logger.info(f"[LLM监控模式] 找到@对象: {target_name} ({target_id})")
-                schedule_info["target_id"] = target_id
-                schedule_info["target_name"] = target_name
-            else:
-                # 如果没有@对象，检查LLM提取的target是否为昵称
-                extracted_target = schedule_info.get("target", "用户")
-                if extracted_target != "用户":
-                    # 尝试根据昵称查找用户ID
-                    logger.info(f"[LLM监控模式] 尝试根据昵称查找用户: '{extracted_target}'")
-                    nickname_user_id = self._get_userid_by_nickname(extracted_target)
-                    if nickname_user_id:
-                        logger.info(f"[LLM监控模式] ✓ 找到昵称映射: '{extracted_target}' → 用户ID={nickname_user_id}")
-                        schedule_info["target_id"] = nickname_user_id
-                        schedule_info["target_name"] = extracted_target
-                    else:
-                        logger.warning(f"[LLM监控模式] ✗ 未找到昵称映射: '{extracted_target}'")
-                else:
-                    logger.info(f"[LLM监控模式] 未找到@对象，默认为自己")
-        except asyncio.TimeoutError:
-            logger.warning(f"[LLM监控模式] 获取@对象超时，默认为自己")
-        except Exception as e:
-            logger.error(f"[LLM监控模式] 获取@对象异常: {e}", exc_info=True)
+        # 简化：只支持提醒自己，不再检查@对象或昵称
+        # schedule_info中的target默认为"用户"，表示提醒自己
+        logger.info(f"[LLM监控模式] 步骤3: 创建提醒（仅支持提醒自己）...")
 
-        # 第三步：创建日程（带超时）
-        logger.info(f"[LLM监控模式] 步骤4: 开始创建日程...")
+        # 创建日程（带超时）
         try:
             result = await asyncio.wait_for(
                 self._create_schedule(event, schedule_info),
@@ -424,7 +339,7 @@ class ReminderPlugin(Star):
 
         if result["success"]:
             # 生成人格化回复（带超时，失败时使用兜底回复）
-            logger.info(f"[LLM监控模式] 步骤5: 生成确认回复...")
+            logger.info(f"[LLM监控模式] 步骤4: 生成确认回复...")
             try:
                 response = await asyncio.wait_for(
                     self._generate_confirmation_response(schedule_info, event),
@@ -587,44 +502,22 @@ class ReminderPlugin(Star):
 
         current_time = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S 星期%w")
         
-        # 检查消息中是否有@（At组件或文本中的@）
-        has_at = False
-        for component in event.message_obj.message:
-            if isinstance(component, At):
-                has_at = True
-                break
-        if not has_at and '@' in message:
-            has_at = True
-        
-        # 获取uni_nickname的昵称列表，用于LLM识别
-        nickname_mappings = self._get_uni_nickname_mappings()
-        nicknames_list = list(nickname_mappings.values()) if nickname_mappings else []
-        nickname_hint = ""
-        if nicknames_list:
-            nickname_hint = f"\n已知昵称列表：{', '.join(nicknames_list[:10])}（如果消息中提到这些昵称，表示要提醒该昵称对应的人）"
-        
-        at_hint = ""
-        if has_at:
-            at_hint = "\n注意：消息中包含@某人，这表示用户想提醒另一个人，而不是提醒自己。target字段应填写被@的人（如果无法确定名字，填'被@的人'）。"
-
+        # 简化：只支持提醒自己，不再处理@和昵称
         prompt = f"""请从以下用户消息中提取日程关键信息，并以JSON格式返回：
 用户消息："{message}"
 当前时间：{current_time}
-{f"网络搜索补充信息：{search_info}" if search_info else ""}{at_hint}{nickname_hint}
+{f"网络搜索补充信息：{search_info}" if search_info else ""}
 
 请提取以下信息：
 1. time: 提醒的具体时间描述（如：明天下午3点、10分钟后、下周一早上9点等）
-2. event: 要提醒的事件内容（用简洁的语言描述，去除@某人等格式符号）
-3. target: 提醒的目标对象
-   - 如果消息中提到具体人名/昵称（如"提醒小龙"、"提醒老板"），提取该人名/昵称
-   - 如果消息中有@提及，提取被@的人的显示名称
-   - 否则填"用户"表示提醒自己
+2. event: 要提醒的事件内容（用简洁的语言描述）
+3. target: 固定填"用户"（本插件仅支持提醒自己）
 
 请严格按照以下JSON格式返回，不要包含其他内容：
 {{
     "time": "时间描述",
     "event": "事件内容",
-    "target": "目标对象"
+    "target": "用户"
 }}"""
 
         try:
@@ -1403,11 +1296,14 @@ class ReminderPlugin(Star):
             logger.error(f"发送戳一戳失败: {e}", exc_info=True)
 
     async def _send_reminder(self, schedule: ScheduleItem):
-        """发送提醒消息（完整流程：戳一戳+@+文本+TTS）"""
+        """发送提醒消息
+        
+        消息格式：戳一戳 + @ + 昵称 + LLM生成的提醒文本
+        """
         try:
             umo = schedule.unified_msg_origin
 
-            # 生成提醒消息
+            # 生成提醒消息（LLM生成的文本）
             message = await self._generate_reminder_message(schedule)
 
             # ===== 步骤1: 戳一戳提醒对象 =====
@@ -1417,16 +1313,22 @@ class ReminderPlugin(Star):
                 # 戳一戳后稍微延迟一下，避免消息发送过快
                 await asyncio.sleep(0.5)
 
-            # ===== 步骤2: @提醒对象+提醒文本 =====
+            # ===== 步骤2: @用户 + 昵称 + 提醒文本 =====
             chain = []
 
-            # 始终尝试@目标用户（包括自己提醒自己）
-            # 只要有 target_id，就添加 @
-            # 注意：昵称替换由uni_nickname插件在LLM层面处理，这里不需要添加固定昵称文本
+            # @目标用户（提醒自己也@自己）
             if schedule.target_id:
-                chain.append(At(qq=int(schedule.target_id)))  # 修复：使用int类型
-                chain.append(Plain(" "))  # At后加个空格
+                chain.append(At(qq=int(schedule.target_id)))
+                chain.append(Plain(" "))
+                
+                # 添加配置的昵称
+                user_nickname = self._get_user_display_name(
+                    schedule.target_id, 
+                    schedule.target_name or "你"
+                )
+                chain.append(Plain(f"{user_nickname} "))
 
+            # 添加LLM生成的提醒文本
             chain.append(Plain(message))
             
             # 发送文本消息

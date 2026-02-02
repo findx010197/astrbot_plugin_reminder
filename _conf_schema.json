@@ -133,6 +133,12 @@
     "hint": "是否将日程数据持久化存储（重启后保留）",
     "default": true
   },
+  "user_alias": {
+    "description": "用户昵称映射",
+    "type": "list",
+    "hint": "格式：用户QQ号,昵称。例如：1498976088,小明。此昵称将在提醒消息中使用",
+    "default": []
+  },
   "reminder_persona": {
     "description": "当前启用的提醒人设",
     "type": "object",
