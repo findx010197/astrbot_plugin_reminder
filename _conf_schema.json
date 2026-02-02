@@ -29,6 +29,12 @@
     "hint": "是否在提醒时使用语音播报",
     "default": false
   },
+  "enable_poke": {
+    "description": "启用戳一戳提醒",
+    "type": "bool",
+    "hint": "是否在提醒时使用戳一戳功能（仅QQ平台支持）",
+    "default": true
+  },
   "enable_web_search": {
     "description": "启用网络搜索",
     "type": "bool",

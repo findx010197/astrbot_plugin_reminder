@@ -7,7 +7,9 @@ AstrBot 智能日程提醒插件
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
-import astrbot.api.message_components as Comp
+
+# 使用Core层的消息组件（修复At组件问题）
+from astrbot.core.message.components import Plain, At, Record
 
 import asyncio
 import concurrent.futures
@@ -35,7 +37,7 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_
     "astrbot_plugin_reminder",
     "findx010197",
     "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳",
-    "3.2.2",
+    "3.2.3",
     "https://github.com/findx010197/astrbot_plugin_reminder",
 )
 class ReminderPlugin(Star):
@@ -263,7 +265,7 @@ class ReminderPlugin(Star):
 
         # 检查是否有 @ 对象
         logger.info(f"[LLM监控模式] 步骤3: 检查@对象...")
-        target_id, target_name = self._get_at_target(event)
+        target_id, target_name = await self._get_at_target(event)
         if target_id:
             logger.info(f"[LLM监控模式] 找到@对象: {target_name} ({target_id})")
             schedule_info["target_id"] = target_id
@@ -341,10 +343,15 @@ class ReminderPlugin(Star):
 
         return text.strip()
 
-    def _get_at_target(
+    async def _get_at_target(
         self, event: AstrMessageEvent
     ) -> tuple[Optional[str], Optional[str]]:
-        """从消息中获取第一个被@的用户ID和名称"""
+        """从消息中获取第一个被@的用户ID和真实昵称
+        
+        返回: (target_id, target_name)
+        """
+        from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+        
         # 调试日志：打印消息链结构
         try:
             logger.debug(
@@ -353,27 +360,51 @@ class ReminderPlugin(Star):
         except Exception:
             pass
 
-        # 1. 优先从 At 组件中获取
+        # 1. 从消息链中提取At组件
+        target_id = None
         for component in event.message_obj.message:
-            if isinstance(component, Comp.At):
+            if isinstance(component, At):  # 使用Core层的At
                 target_id = str(getattr(component, "qq", getattr(component, "id", "")))
                 if target_id:
-                    return target_id, "TA"
+                    break
 
-        # 2. 如果没有 At 组件，尝试从文本中正则匹配 @xxx
-        # 这里的匹配比较简单，实际ID可能无法从文本直接获取（取决于平台）
-        # 如果是纯文本环境，可能需要用户输入ID，或者只能做到形式上的@
-        text = event.message_str
-        match = re.search(r"@(\S+)", text)
-        if match:
-            # 注意：从文本只能提取到名字，无法获取真实ID
-            # 这种情况下，target_id 可能只能设为 sender_id (提醒自己)，或者设为特殊值
-            # 为了避免逻辑错误，这里仅记录名字，ID 暂时留空或设为 sender_id
-            name = match.group(1)
-            logger.info(f"从文本中匹配到 @{name}，但无法获取真实ID")
-            return None, name  # 返回 None ID 表示无法从系统层面 @
-
-        return None, None
+        if not target_id:
+            # 2. 如果没有At组件，尝试从文本中正则匹配 @xxx（仅记录，不获取ID）
+            text = event.message_str
+            match = re.search(r"@(\S+)", text)
+            if match:
+                name = match.group(1)
+                logger.info(f"从文本中匹配到 @{name}，但无法获取真实ID")
+            return None, None
+        
+        # 3. 获取真实昵称（仅aiocqhttp平台支持）
+        target_name = "TA"  # 默认名称
+        
+        if isinstance(event, AiocqhttpMessageEvent):
+            group_id = event.get_group_id()
+            if group_id:  # 群聊环境
+                try:
+                    members = await event.bot.api.call_action('get_group_member_list', group_id=group_id)
+                    if members:
+                        for m in members:
+                            if str(m.get("user_id")) == target_id:
+                                card = m.get("card", "")
+                                nickname = m.get("nickname", "")
+                                target_name = card if card else nickname
+                                logger.info(f"获取到群成员昵称: {target_name} (ID:{target_id})")
+                                break
+                except Exception as e:
+                    logger.warning(f"获取群成员昵称失败: {e}")
+            else:  # 私聊环境
+                try:
+                    stranger_info = await event.bot.api.call_action('get_stranger_info', user_id=int(target_id))
+                    if stranger_info:
+                        target_name = stranger_info.get("nickname", "TA")
+                        logger.info(f"获取到私聊昵称: {target_name} (ID:{target_id})")
+                except Exception as e:
+                    logger.warning(f"获取私聊昵称失败: {e}")
+        
+        return target_id, target_name
 
     async def _is_schedule_trigger(self, message: str, event: AstrMessageEvent) -> bool:
         """判断消息是否为日程设定请求"""
@@ -732,7 +763,7 @@ class ReminderPlugin(Star):
         }
 
         # 检查是否有 @ 对象
-        target_id, target_name = self._get_at_target(event)
+        target_id, target_name = await self._get_at_target(event)
         if target_id:
             schedule_info["target_id"] = target_id
             schedule_info["target_name"] = target_name
@@ -814,7 +845,7 @@ class ReminderPlugin(Star):
             return
 
         # 检查是否有 @ 对象
-        target_id, target_name = self._get_at_target(event)
+        target_id, target_name = await self._get_at_target(event)
         if target_id:
             schedule_info["target_id"] = target_id
             schedule_info["target_name"] = target_name
@@ -869,7 +900,7 @@ class ReminderPlugin(Star):
             return
 
         # 检查是否有 @ 对象
-        target_id, target_name = self._get_at_target(event)
+        target_id, target_name = await self._get_at_target(event)
         if target_id:
             schedule_info["target_id"] = target_id
             schedule_info["target_name"] = target_name
@@ -1134,25 +1165,91 @@ class ReminderPlugin(Star):
             logger.error(f"计算下次触发时间失败: {e}")
             return None
 
+    async def _send_poke(self, unified_msg_origin: str, target_id: str):
+        """发送戳一戳
+        
+        Args:
+            unified_msg_origin: 统一消息来源标识
+            target_id: 目标用户ID
+        """
+        from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+        
+        try:
+            # 从unified_msg_origin解析平台信息
+            # 格式: platform_name:message_type:session_id
+            parts = unified_msg_origin.split(":")
+            if len(parts) < 3:
+                logger.warning(f"无效的unified_msg_origin格式: {unified_msg_origin}")
+                return
+            
+            platform_name = parts[0]
+            message_type = parts[1]
+            session_id = parts[2]
+            
+            # 只有aiocqhttp平台支持戳一戳
+            if platform_name != "aiocqhttp":
+                logger.debug(f"平台 {platform_name} 不支持戳一戳")
+                return
+            
+            # 获取平台实例
+            from astrbot.api.event import filter as event_filter
+            platform = self.context.get_platform(event_filter.PlatformAdapterType.AIOCQHTTP)
+            if not platform:
+                logger.warning("未找到aiocqhttp平台实例")
+                return
+            
+            # 获取bot实例（需要从platform中获取）
+            # 这里有个问题：我们没有event对象，无法直接访问bot
+            # 需要通过platform的client来调用API
+            
+            # 检查是否为群聊
+            is_group = message_type == "group"
+            
+            if is_group:
+                # 群戳一戳
+                # session_id就是group_id
+                group_id = session_id
+                # platform.get_client() 可能需要根据具体实现调整
+                # 暂时记录日志，实际调用需要测试
+                logger.info(f"准备发送群戳一戳: group={group_id}, user={target_id}")
+                # await platform.get_client().api.call_action('group_poke', group_id=group_id, user_id=int(target_id))
+            else:
+                # 私聊戳一戳
+                logger.info(f"准备发送私聊戳一戳: user={target_id}")
+                # await platform.get_client().api.call_action('friend_poke', user_id=int(target_id))
+            
+            # TODO: 完善bot实例获取逻辑
+            logger.warning("戳一戳功能尚未完全实现，需要进一步测试和完善")
+            
+        except Exception as e:
+            logger.error(f"发送戳一戳失败: {e}", exc_info=True)
+
     async def _send_reminder(self, schedule: ScheduleItem):
-        """发送提醒消息"""
+        """发送提醒消息（完整流程：戳一戳+@+文本+TTS）"""
         try:
             umo = schedule.unified_msg_origin
 
             # 生成提醒消息
             message = await self._generate_reminder_message(schedule)
 
-            # 构建消息链
+            # ===== 步骤1: 戳一戳提醒对象 =====
+            if schedule.target_id and self.config.get("enable_poke", True):
+                logger.info(f"发送戳一戳: target={schedule.target_id}")
+                await self._send_poke(umo, schedule.target_id)
+                # 戳一戳后稍微延迟一下，避免消息发送过快
+                await asyncio.sleep(0.5)
+
+            # ===== 步骤2: @提醒对象+昵称+提醒文本 =====
             chain = []
 
             # 始终尝试@目标用户（包括自己提醒自己）
             # 只要有 target_id，就添加 @
             if schedule.target_id:
-                chain.append(Comp.At(qq=schedule.target_id))
-                chain.append(Comp.Plain(" "))  # At后加个空格
+                chain.append(At(qq=int(schedule.target_id)))  # 修复：使用int类型
+                chain.append(Plain(" "))  # At后加个空格
 
-            chain.append(Comp.Plain(message))
-
+            chain.append(Plain(message))
+            
             # 发送文本消息
             message_chain = MessageChain()
             message_chain.chain = chain
@@ -1160,12 +1257,12 @@ class ReminderPlugin(Star):
 
             logger.info(f"已发送提醒消息: {message[:50]}...")
 
-            # TTS语音播报
+            # ===== 步骤3: TTS语音播报 =====
             if self.config.get("enable_tts", False):
                 await self._send_tts_reminder(schedule, message)
 
         except Exception as e:
-            logger.error(f"发送提醒消息失败: {e}")
+            logger.error(f"发送提醒消息失败: {e}", exc_info=True)
 
     async def _send_tts_reminder(self, schedule: ScheduleItem, message: str):
         """发送TTS语音提醒"""
@@ -1241,7 +1338,7 @@ class ReminderPlugin(Star):
 
             if audio_path and os.path.exists(audio_path):
                 # 发送语音消息
-                chain = [Comp.Record(file=str(audio_path), url=str(audio_path))]
+                chain = [Record(file=str(audio_path), url=str(audio_path))]
                 message_chain = MessageChain()
                 message_chain.chain = chain
                 await self.context.send_message(

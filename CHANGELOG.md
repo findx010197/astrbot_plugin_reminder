@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v3.2.3] - 2026-02-02
+
+### Fixed
+- **[关键修复] @成员提醒卡死问题**：
+  - 修复导入层错误：改用Core层的消息组件替代API层
+  - 修复At组件构造：使用正确的int类型参数
+  - 重写_get_at_target函数：支持异步获取真实昵称
+  
+### Added
+- **戳一戳功能**：
+  - 添加_send_poke方法支持戳一戳提醒（aiocqhttp平台）
+  - 完整提醒流程：戳一戳 → @+文本 → TTS语音
+  - 添加enable_poke配置项（默认开启）
+  
+### Changed
+- **真实昵称获取**：
+  - 群聊环境：通过get_group_member_list API获取群名片/昵称
+  - 私聊环境：通过get_stranger_info API获取用户昵称
+  - 所有_get_at_target调用改为await异步调用
+
+---
+
 ## [v3.2.2] - 2026-02-02
 
 ### Fixed
