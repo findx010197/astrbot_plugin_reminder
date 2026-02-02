@@ -134,9 +134,9 @@
     "default": true
   },
   "user_alias": {
-    "description": "用户昵称映射",
+    "description": "用户昵称映射表",
     "type": "list",
-    "hint": "格式：用户QQ号,昵称。例如：1498976088,小明。此昵称将在提醒消息中使用",
+    "hint": "格式：用户QQ号,昵称。例如：1498976088,小明。此昵称仅用于LLM生成的提醒文本中",
     "default": []
   },
   "reminder_persona": {

@@ -71,33 +71,6 @@ class ReminderPlugin(Star):
         """在线程池中执行数据库操作，避免阻塞事件循环"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(_db_executor, lambda: func(*args, **kwargs))
-    
-    def _get_user_display_name(self, user_id: str, default_name: str) -> str:
-        """获取用户显示昵称
-        
-        Args:
-            user_id: 用户QQ号
-            default_name: 默认名称（从平台获取的名称）
-        
-        Returns:
-            用户昵称
-        """
-        # 从配置中读取昵称映射
-        user_alias_list = self.config.get("user_alias", [])
-        
-        for item in user_alias_list:
-            if not isinstance(item, str) or "," not in item:
-                continue
-            parts = item.split(",", 1)
-            if len(parts) == 2:
-                uid = parts[0].strip()
-                alias = parts[1].strip()
-                if uid == str(user_id) and alias:
-                    logger.debug(f"[用户昵称] 用户{user_id}使用配置昵称: '{alias}'")
-                    return alias
-        
-        logger.debug(f"[用户昵称] 用户{user_id}使用默认名称: '{default_name}'")
-        return default_name
 
     async def _restore_timers(self):
         """从数据库恢复定时任务"""
@@ -315,11 +288,11 @@ class ReminderPlugin(Star):
             event.stop_event()
             return
 
-        # 简化：只支持提醒自己，不再检查@对象或昵称
-        # schedule_info中的target默认为"用户"，表示提醒自己
-        logger.info(f"[LLM监控模式] 步骤3: 创建提醒（仅支持提醒自己）...")
-
-        # 创建日程（带超时）
+        # LLM监控模式只支持提醒自己，不处理@对象
+        logger.info(f"[LLM监控模式] 创建自己的提醒日程...")
+        
+        # 第三步：创建日程（带超时）
+        logger.info(f"[LLM监控模式] 步骤3: 开始创建日程...")
         try:
             result = await asyncio.wait_for(
                 self._create_schedule(event, schedule_info),
@@ -502,7 +475,15 @@ class ReminderPlugin(Star):
 
         current_time = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S 星期%w")
         
-        # 简化：只支持提醒自己，不再处理@和昵称
+        # 检查消息中是否有@（At组件或文本中的@）
+        has_at = False
+        for component in event.message_obj.message:
+            if isinstance(component, At):
+                has_at = True
+                break
+        if not has_at and '@' in message:
+            has_at = True
+
         prompt = f"""请从以下用户消息中提取日程关键信息，并以JSON格式返回：
 用户消息："{message}"
 当前时间：{current_time}
@@ -511,13 +492,13 @@ class ReminderPlugin(Star):
 请提取以下信息：
 1. time: 提醒的具体时间描述（如：明天下午3点、10分钟后、下周一早上9点等）
 2. event: 要提醒的事件内容（用简洁的语言描述）
-3. target: 固定填"用户"（本插件仅支持提醒自己）
+3. target: 提醒的目标对象（LLM监控模式固定填"用户"，表示提醒自己）
 
 请严格按照以下JSON格式返回，不要包含其他内容：
 {{
     "time": "时间描述",
     "event": "事件内容",
-    "target": "用户"
+    "target": "目标对象"
 }}"""
 
         try:
@@ -1296,14 +1277,11 @@ class ReminderPlugin(Star):
             logger.error(f"发送戳一戳失败: {e}", exc_info=True)
 
     async def _send_reminder(self, schedule: ScheduleItem):
-        """发送提醒消息
-        
-        消息格式：戳一戳 + @ + 昵称 + LLM生成的提醒文本
-        """
+        """发送提醒消息（完整流程：戳一戳+@+文本+TTS）"""
         try:
             umo = schedule.unified_msg_origin
 
-            # 生成提醒消息（LLM生成的文本）
+            # 生成提醒消息
             message = await self._generate_reminder_message(schedule)
 
             # ===== 步骤1: 戳一戳提醒对象 =====
@@ -1313,22 +1291,14 @@ class ReminderPlugin(Star):
                 # 戳一戳后稍微延迟一下，避免消息发送过快
                 await asyncio.sleep(0.5)
 
-            # ===== 步骤2: @用户 + 昵称 + 提醒文本 =====
+            # ===== 步骤2: @提醒对象+提醒文本 =====
             chain = []
 
-            # @目标用户（提醒自己也@自己）
+            # @目标用户（提醒自己）
             if schedule.target_id:
                 chain.append(At(qq=int(schedule.target_id)))
                 chain.append(Plain(" "))
-                
-                # 添加配置的昵称
-                user_nickname = self._get_user_display_name(
-                    schedule.target_id, 
-                    schedule.target_name or "你"
-                )
-                chain.append(Plain(f"{user_nickname} "))
 
-            # 添加LLM生成的提醒文本
             chain.append(Plain(message))
             
             # 发送文本消息
@@ -1554,7 +1524,7 @@ class ReminderPlugin(Star):
 
         is_self = target_id == sender_id or not target_id
 
-        # 获取用户昵称映射（使用uni_nickname插件）
+        # 获取用户昵称映射（从配置读取）
         sender_display = self._get_user_display_name(sender_id, event.get_sender_name())
         target_display = self._get_user_display_name(
             target_id, schedule_info.get("target_name", "TA")
@@ -1644,7 +1614,7 @@ class ReminderPlugin(Star):
             return f"✅ 好的，我会{time_prefix}在{time_str}提醒{'你' if is_self else target_display}：{event_content}"
 
     def _get_user_display_name(self, user_id: str, default_name: str) -> str:
-        """获取用户显示名称（优先使用uni_nickname插件的映射）
+        """获取用户显示名称（从配置读取昵称映射）
         
         Args:
             user_id: 用户QQ号
@@ -1653,15 +1623,21 @@ class ReminderPlugin(Star):
         Returns:
             用户昵称
         """
-        mappings = self._get_uni_nickname_mappings()
-        result = mappings.get(str(user_id), default_name)
+        # 从配置读取昵称映射
+        user_alias_list = self.config.get("user_alias", [])
+        for item in user_alias_list:
+            if not isinstance(item, str) or "," not in item:
+                continue
+            parts = item.split(",", 1)
+            if len(parts) == 2:
+                uid = parts[0].strip()
+                alias = parts[1].strip()
+                if uid == str(user_id) and alias:
+                    logger.debug(f"[获取昵称] 用户{user_id}使用配置昵称: '{alias}'")
+                    return alias
         
-        if str(user_id) in mappings:
-            logger.info(f"[获取昵称] ✓ 用户{user_id}使用uni_nickname映射: '{result}'")
-        else:
-            logger.debug(f"[获取昵称] 用户{user_id}未在uni_nickname中，使用默认名称: '{default_name}'")
-        
-        return result
+        logger.debug(f"[获取昵称] 用户{user_id}使用默认名称: '{default_name}'")
+        return default_name
 
     async def _generate_reminder_message(self, schedule: ScheduleItem) -> str:
         """生成提醒消息"""
