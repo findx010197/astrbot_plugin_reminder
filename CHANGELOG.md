@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v3.3.0] - 2026-02-02
+
+### Changed - 架构简化
+- **回归简单可靠**：移除复杂的uni_nickname集成，专注核心功能
+- **仅支持提醒自己**：移除"提醒别人"功能，降低复杂度
+- **恢复user_alias配置**：使用内置昵称映射，格式：`"QQ号,昵称"`
+
+### Improved
+- **提醒消息格式优化**：
+  - 新格式：戳一戳 + @ + 昵称 + LLM生成文本
+  - 昵称从user_alias配置读取，未配置则使用群昵称
+  - 示例：`@用户 小明 15:30到了，该去上厕所啦~`
+
+- **LLM监控流程简化**：
+  - 从5步减少到4步（移除@对象检查）
+  - 移除昵称反向查找逻辑
+  - 降低超时风险，提升稳定性
+
+### Removed
+- 移除uni_nickname插件依赖
+- 移除基于昵称的"提醒别人"功能
+- 移除@成员提醒功能
+- 移除复杂的昵称反向查找
+
+### Documentation
+- 清理所有测试文档和诊断报告
+- 更新README，移除uni_nickname相关说明
+- 所有更新说明统一维护在CHANGELOG.md
+
+### Breaking Changes
+- ⚠️ 不再支持"提醒别人"功能
+- ⚠️ 需要在插件配置中设置user_alias
+
+---
+
 ## [v3.2.6] - 2026-02-02
 
 ### Added
