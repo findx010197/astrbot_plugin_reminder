@@ -35,7 +35,7 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_
     "astrbot_plugin_reminder",
     "findx010197",
     "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳",
-    "3.2.0",
+    "3.2.1",
     "https://github.com/findx010197/astrbot_plugin_reminder",
 )
 class ReminderPlugin(Star):
@@ -47,6 +47,9 @@ class ReminderPlugin(Star):
 
         # 存储定时任务（内存中，重启后从数据库恢复）
         self.timers: Dict[str, asyncio.Task] = {}
+        
+        # 消息去重缓存 (key: f"{sender_id}:{message_hash}", value: timestamp)
+        self._message_dedup_cache: dict[str, float] = {}
 
         # 数据存储路径
         # 使用相对路径，避免依赖 astrbot.core
@@ -718,6 +721,82 @@ class ReminderPlugin(Star):
                 f"📌 {event_content}\n"
                 f"🔁 {recurrence_desc} {recurrence_time}\n"
                 f"⏰ 首次: {trigger_dt.strftime('%m/%d %H:%M')}\n"
+                f"🏷️ {schedule.short_id}"
+            )
+        else:
+            yield event.plain_result(result["message"])
+
+    @callme_group.command("at")
+    async def callme_at(self, event: AstrMessageEvent):
+        """创建一次性提醒（指令模式）
+
+        用法: /callme at <时间> <事件>
+        
+        时间格式示例：
+        • 相对时间：5分钟后、半小时后、2小时后
+        • 今天：今天下午3点、今晚8点
+        • 明天：明天早上、明天下午2点
+        • 具体日期：下周一上午9点、2月15日下午3点
+        
+        示例：
+        • /callme at 10分钟后 记得喝水
+        • /callme at 明天早上9点 开会
+        • /callme at 下周一下午3点 提交报告
+        """
+        message = event.message_str.strip()
+
+        # 移除指令前缀
+        prefixes = ["/callme at", "callme at"]
+        for prefix in prefixes:
+            if message.lower().startswith(prefix):
+                message = message[len(prefix):].strip()
+                break
+
+        if not message:
+            yield event.plain_result(
+                "📌 一次性提醒使用说明：\n\n"
+                "/callme at <时间> <事件>\n\n"
+                "时间格式示例：\n"
+                "• 5分钟后、半小时后、2小时后\n"
+                "• 今天下午3点、今晚8点\n"
+                "• 明天早上、明天中午、明天晚上\n"
+                "• 下周一上午9点\n\n"
+                "示例：\n"
+                "• /callme at 10分钟后 记得喝水\n"
+                "• /callme at 明天早上9点 开会\n"
+                "• /callme at 下周一下午3点 提交报告"
+            )
+            return
+
+        # 使用LLM提取信息
+        schedule_info = await self._extract_schedule_info(message, event)
+
+        if not schedule_info:
+            yield event.plain_result(
+                "❌ 无法理解您的提醒请求\n\n"
+                "请使用格式: /callme at <时间> <事件>\n"
+                "示例: /callme at 明天早上9点 开会"
+            )
+            return
+
+        # 检查是否有 @ 对象
+        target_id, target_name = self._get_at_target(event)
+        if target_id:
+            schedule_info["target_id"] = target_id
+            schedule_info["target_name"] = target_name
+
+        # 创建日程
+        result = await self._create_schedule(event, schedule_info)
+
+        if result["success"]:
+            schedule = result["schedule"]
+            trigger_dt = datetime.fromtimestamp(schedule.trigger_time)
+            
+            yield event.plain_result(
+                f"✅ 一次性提醒已创建\n"
+                f"─────────────\n"
+                f"📌 {schedule.event_content}\n"
+                f"⏰ {trigger_dt.strftime('%m月%d日 %H:%M')}\n"
                 f"🏷️ {schedule.short_id}"
             )
         else:

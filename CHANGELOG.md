@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v3.2.1] - 2026-02-02
+
+### Fixed
+- **[致命修复] 初始化缺失**：
+  - 修复 `_message_dedup_cache` 未在 `__init__` 中初始化导致的 `AttributeError`
+  - 测试场景1、2报错：`'ReminderPlugin' object has no attribute '_message_dedup_cache'`
+  - 现已在构造函数中正确初始化为空字典
+
+### Added
+- **新增 `/callme at` 指令**：
+  - 用于通过指令模式创建一次性提醒
+  - 支持相对时间（`5分钟后`、`半小时后`）和绝对时间（`明天早上9点`）
+  - 使用示例：`/callme at 10分钟后 记得喝水`
+  - 解决测试场景4反馈的功能缺失问题
+
+### Improved
+- 指令菜单现支持完整功能：
+  - `/callme at` - 一次性提醒
+  - `/callme every` - 循环提醒
+  - `/callme list` - 查看列表
+  - `/callme cancel` - 取消提醒
+
 ## [v3.2.0] - 2026-02-02
 
 ### Fixed
