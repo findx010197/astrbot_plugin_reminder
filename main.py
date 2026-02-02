@@ -141,6 +141,17 @@ class ReminderPlugin(Star):
         message_str = event.message_str.strip()
         if not message_str:
             return
+        
+        # ===== 诊断日志：打印消息详情 =====
+        logger.debug(f"[LLM监控诊断] message_str: {message_str}")
+        logger.debug(f"[LLM监控诊断] message_obj类型: {type(event.message_obj)}")
+        try:
+            components = [f"{type(c).__name__}({getattr(c, 'text', getattr(c, 'qq', '?'))})" 
+                         for c in event.message_obj.message]
+            logger.debug(f"[LLM监控诊断] 消息组件: {components}")
+        except Exception as e:
+            logger.debug(f"[LLM监控诊断] 无法解析消息组件: {e}")
+        # ===== 诊断日志结束 =====
 
         # 消息长度过滤：太短或太长的消息不太可能是日程请求
         if len(message_str) < 4 or len(message_str) > 200:
@@ -191,7 +202,13 @@ class ReminderPlugin(Star):
         # 注意：移除@符号和CQ码后再检查，避免@影响关键词匹配
         clean_msg = re.sub(r'\[CQ:.*?\]', '', message_str)  # 移除CQ码
         clean_msg = re.sub(r'@\S+', '', clean_msg)  # 移除@提及
+        
         has_trigger_keyword = any(keyword in message_str or keyword in clean_msg for keyword in trigger_keywords)
+        
+        logger.debug(f"[LLM监控诊断] 原消息: {message_str[:100]}")
+        logger.debug(f"[LLM监控诊断] 清理后: {clean_msg[:100]}")
+        logger.debug(f"[LLM监控诊断] 关键词匹配: {has_trigger_keyword}")
+        
         if not has_trigger_keyword:
             return  # 快速返回，避免 LLM 调用
 
@@ -218,12 +235,14 @@ class ReminderPlugin(Star):
         logger.debug(f"[LLM监控模式] 发送者: {sender_id}, 消息Hash: {message_hash}")
 
         # 第一步：使用 LLM 进一步确认是否为日程设定请求（带超时）
+        step1_start = time.time()
         logger.info(f"[LLM监控模式] 步骤1: 开始判断是否为日程请求...")
         try:
             is_trigger = await asyncio.wait_for(
                 self._is_schedule_trigger(message_str, event),
                 timeout=10.0  # 10秒超时
             )
+            logger.info(f"[LLM监控模式] 步骤1完成: 耗时{time.time()-step1_start:.2f}秒, 结果={is_trigger}")
         except asyncio.TimeoutError:
             logger.warning(f"[LLM监控模式] LLM判断超时，跳过消息: {message_str[:50]}")
             event.stop_event()  # 确保停止事件传播
@@ -240,13 +259,14 @@ class ReminderPlugin(Star):
         logger.info(f"[LLM监控模式] 检测到日程设定请求: {message_str}")
 
         # 第二步：提取日程信息（带超时）
+        step2_start = time.time()
         logger.info(f"[LLM监控模式] 步骤2: 开始提取日程信息...")
         try:
             schedule_info = await asyncio.wait_for(
                 self._extract_schedule_info(message_str, event),
                 timeout=15.0  # 15秒超时
             )
-            logger.info(f"[LLM监控模式] 提取结果: {schedule_info}")
+            logger.info(f"[LLM监控模式] 步骤2完成: 耗时{time.time()-step2_start:.2f}秒, 提取结果: {schedule_info}")
         except asyncio.TimeoutError:
             logger.warning(f"[LLM监控模式] 提取日程信息超时")
             yield event.plain_result("抱歉，处理超时了，请稍后重试或使用指令模式 /callme")
@@ -452,9 +472,14 @@ class ReminderPlugin(Star):
         self, message: str, event: AstrMessageEvent
     ) -> Optional[dict]:
         """使用LLM提取日程关键信息"""
+        logger.debug(f"[提取信息] 开始提取，消息: {message[:100]}")
+        
         provider = await self._get_main_provider(event)
         if not provider:
+            logger.warning(f"[提取信息] 无法获取LLM Provider，跳过提取")
             return None
+        
+        logger.debug(f"[提取信息] Provider获取成功: {type(provider).__name__}")
 
         # 是否需要网络搜索
         search_info = ""
@@ -494,8 +519,16 @@ class ReminderPlugin(Star):
 }}"""
 
         try:
+            logger.debug(f"[提取信息] 准备调用LLM，prompt长度: {len(prompt)}")
+            llm_start = time.time()
+            
             response = await provider.text_chat(prompt=prompt)
+            llm_time = time.time() - llm_start
+            
+            logger.debug(f"[提取信息] LLM响应完成，耗时: {llm_time:.2f}秒")
+            
             result_text = response.completion_text.strip()
+            logger.debug(f"[提取信息] LLM原始响应: {result_text[:200]}")
 
             # 尝试提取JSON
             json_match = re.search(r"\{[^{}]*\}", result_text, re.DOTALL)
@@ -506,16 +539,17 @@ class ReminderPlugin(Star):
 
             if "time" in schedule_info and "event" in schedule_info:
                 schedule_info["search_info"] = search_info
+                logger.debug(f"[提取信息] 成功提取: {schedule_info}")
                 return schedule_info
 
-            logger.warning(f"提取的信息缺少关键字段: {result_text}")
+            logger.warning(f"[提取信息] 提取的信息缺少关键字段: {result_text}")
             return None
 
         except json.JSONDecodeError as e:
-            logger.error(f"LLM返回的不是有效的JSON格式: {e}")
+            logger.error(f"[提取信息] LLM返回的不是有效的JSON格式: {e}, 响应: {result_text[:200]}")
             return None
         except Exception as e:
-            logger.error(f"提取日程信息时出错: {e}")
+            logger.error(f"[提取信息] 提取日程信息时出错: {e}", exc_info=True)
             return None
 
     # ==================== 指令模式 ====================

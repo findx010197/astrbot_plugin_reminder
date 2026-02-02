@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v3.2.6] - 2026-02-02
+
+### Added
+- **详细诊断日志**：
+  - 添加每个步骤的耗时跟踪（step1_start, step2_start等）
+  - 记录message_str和消息组件详情
+  - 输出关键词匹配过程（原消息 vs 清理后）
+  - LLM调用时间和响应内容记录
+  - Provider获取状态日志
+
+### Improved
+- **错误处理增强**：
+  - _extract_schedule_info 添加详细日志
+  - Provider无法获取时明确警告
+  - LLM响应异常时输出完整堆栈
+  - JSON解析失败时显示LLM原始响应
+
+### Documentation
+- **LLM监控超时诊断报告**：
+  - 分析提醒自己 vs 提醒别人的区别
+  - 定位30秒超时的根本原因
+  - 提供5种解决方案和临时解决方法
+  - 测试建议和下一步计划
+
+### Technical Details
+- 耗时跟踪：使用`time.time()`记录每个关键步骤
+- 日志级别：详细诊断使用DEBUG，关键信息使用INFO/WARNING
+- 调试标记：`[LLM监控诊断]`、`[提取信息]` 等前缀
+
+---
+
 ## [v3.2.5] - 2026-02-02
 
 ### Fixed
