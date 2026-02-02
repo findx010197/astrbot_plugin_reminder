@@ -84,23 +84,39 @@ class ReminderPlugin(Star):
             uni_config = None
             
             # 方法1：通过context访问其他插件配置
+            logger.debug(f"[昵称映射] 尝试方法1: context.get_plugin_config")
             if hasattr(self.context, 'get_plugin_config'):
-                uni_config = self.context.get_plugin_config('uni_nickname')
+                try:
+                    uni_config = self.context.get_plugin_config('uni_nickname')
+                    if uni_config:
+                        logger.info(f"[昵称映射] ✓ 方法1成功，读取到配置: {list(uni_config.keys())}")
+                    else:
+                        logger.debug(f"[昵称映射] 方法1返回空")
+                except Exception as e:
+                    logger.debug(f"[昵称映射] 方法1失败: {e}")
+            else:
+                logger.debug(f"[昵称映射] context没有get_plugin_config方法")
             
             # 方法2：直接读取配置文件
             if not uni_config:
+                logger.debug(f"[昵称映射] 尝试方法2: 读取配置文件")
                 config_path = os.path.join("data", "config", "uni_nickname.json")
+                logger.debug(f"[昵称映射] 配置文件路径: {config_path}")
                 if os.path.exists(config_path):
                     with open(config_path, 'r', encoding='utf-8') as f:
                         uni_config = json.load(f)
+                    logger.info(f"[昵称映射] ✓ 方法2成功，读取到配置: {list(uni_config.keys())}")
+                else:
+                    logger.warning(f"[昵称映射] ✗ 配置文件不存在: {config_path}")
             
             if not uni_config:
-                logger.debug("[昵称映射] 未找到uni_nickname插件配置")
+                logger.warning("[昵称映射] ⚠️ 未找到uni_nickname插件配置（两种方法都失败）")
                 return {}
             
             # 解析映射列表
             mappings = {}
             mapping_list = uni_config.get("nickname_mappings", [])
+            logger.debug(f"[昵称映射] 原始映射列表: {mapping_list}")
             
             for item in mapping_list:
                 if not isinstance(item, str) or "," not in item:
@@ -112,11 +128,11 @@ class ReminderPlugin(Star):
                     if user_id and nickname:
                         mappings[user_id] = nickname
             
-            logger.debug(f"[昵称映射] 成功加载 {len(mappings)} 个昵称映射")
+            logger.info(f"[昵称映射] ✓ 成功加载 {len(mappings)} 个昵称映射: {mappings}")
             return mappings
             
         except Exception as e:
-            logger.error(f"[昵称映射] 获取uni_nickname配置失败: {e}")
+            logger.error(f"[昵称映射] ✗ 获取uni_nickname配置失败: {e}", exc_info=True)
             return {}
     
     def _get_userid_by_nickname(self, nickname: str) -> Optional[str]:
@@ -129,9 +145,15 @@ class ReminderPlugin(Star):
             用户QQ号，未找到则返回None
         """
         mappings = self._get_uni_nickname_mappings()
+        
+        logger.debug(f"[昵称反查] 查找昵称: '{nickname}', 可用映射: {mappings}")
+        
         for user_id, nick in mappings.items():
             if nick == nickname:
+                logger.info(f"[昵称反查] ✓ 找到匹配: '{nickname}' → {user_id}")
                 return user_id
+        
+        logger.warning(f"[昵称反查] ✗ 未找到匹配: '{nickname}'")
         return None
 
     async def _restore_timers(self):
@@ -287,11 +309,13 @@ class ReminderPlugin(Star):
         
         # 检查是否重复
         if dedup_key in self._message_dedup_cache:
-            logger.info(f"[LLM监控模式] 重复消息，跳过处理: {message_str[:50]}")
+            time_diff = current_time - self._message_dedup_cache[dedup_key]
+            logger.info(f"[LLM监控模式] ⚠️ 检测到重复消息（{time_diff:.1f}秒前已处理），跳过: {message_str[:50]}")
             return
         
         # 记录此次处理
         self._message_dedup_cache[dedup_key] = current_time
+        logger.debug(f"[LLM监控模式] ✓ 消息去重检查通过: {dedup_key}")
 
         logger.info(f"[LLM监控模式] 关键词预匹配成功: {message_str}")
         logger.debug(f"[LLM监控模式] 发送者: {sender_id}, 消息Hash: {message_hash}")
@@ -364,14 +388,14 @@ class ReminderPlugin(Star):
                 extracted_target = schedule_info.get("target", "用户")
                 if extracted_target != "用户":
                     # 尝试根据昵称查找用户ID
-                    logger.info(f"[LLM监控模式] 尝试根据昵称查找用户: {extracted_target}")
+                    logger.info(f"[LLM监控模式] 尝试根据昵称查找用户: '{extracted_target}'")
                     nickname_user_id = self._get_userid_by_nickname(extracted_target)
                     if nickname_user_id:
-                        logger.info(f"[LLM监控模式] 找到昵称对应的用户: {extracted_target} → {nickname_user_id}")
+                        logger.info(f"[LLM监控模式] ✓ 找到昵称映射: '{extracted_target}' → 用户ID={nickname_user_id}")
                         schedule_info["target_id"] = nickname_user_id
                         schedule_info["target_name"] = extracted_target
                     else:
-                        logger.info(f"[LLM监控模式] 未找到昵称映射: {extracted_target}")
+                        logger.warning(f"[LLM监控模式] ✗ 未找到昵称映射: '{extracted_target}'")
                 else:
                     logger.info(f"[LLM监控模式] 未找到@对象，默认为自己")
         except asyncio.TimeoutError:
@@ -1728,7 +1752,14 @@ class ReminderPlugin(Star):
             用户昵称
         """
         mappings = self._get_uni_nickname_mappings()
-        return mappings.get(str(user_id), default_name)
+        result = mappings.get(str(user_id), default_name)
+        
+        if str(user_id) in mappings:
+            logger.info(f"[获取昵称] ✓ 用户{user_id}使用uni_nickname映射: '{result}'")
+        else:
+            logger.debug(f"[获取昵称] 用户{user_id}未在uni_nickname中，使用默认名称: '{default_name}'")
+        
+        return result
 
     async def _generate_reminder_message(self, schedule: ScheduleItem) -> str:
         """生成提醒消息"""
