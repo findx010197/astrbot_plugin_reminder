@@ -35,7 +35,7 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_
     "astrbot_plugin_reminder",
     "findx010197",
     "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳",
-    "3.1.0",
+    "3.2.0",
     "https://github.com/findx010197/astrbot_plugin_reminder",
 )
 class ReminderPlugin(Star):
@@ -187,6 +187,25 @@ class ReminderPlugin(Star):
         if not has_trigger_keyword:
             return  # 快速返回，避免 LLM 调用
 
+        # 消息去重：防止多群同时收到同一消息导致重复处理
+        sender_id = event.get_sender_id()
+        message_hash = hash(message_str)
+        dedup_key = f"{sender_id}:{message_hash}"
+        current_time = time.time()
+        
+        # 清理过期缓存（60秒前的记录）
+        expired_keys = [k for k, t in self._message_dedup_cache.items() if current_time - t > 60]
+        for k in expired_keys:
+            del self._message_dedup_cache[k]
+        
+        # 检查是否重复
+        if dedup_key in self._message_dedup_cache:
+            logger.info(f"[LLM监控模式] 重复消息，跳过处理: {message_str[:50]}")
+            return
+        
+        # 记录此次处理
+        self._message_dedup_cache[dedup_key] = current_time
+
         logger.info(f"[LLM监控模式] 关键词预匹配成功: {message_str}")
 
         # 第一步：使用 LLM 进一步确认是否为日程设定请求（带超时）
@@ -321,7 +340,7 @@ class ReminderPlugin(Star):
 
     async def _is_schedule_trigger(self, message: str, event: AstrMessageEvent) -> bool:
         """判断消息是否为日程设定请求"""
-        # 关键词快速匹配
+        # 关键词快速匹配 - 匹配成功直接返回True，避免LLM调用
         trigger_keywords = self.config.get(
             "trigger_keywords",
             [
@@ -341,45 +360,10 @@ class ReminderPlugin(Star):
 
         if any(keyword in message for keyword in trigger_keywords):
             logger.info(f"通过关键词匹配触发日程设定: {message}")
-            return True
+            return True  # 直接返回，不调用LLM
 
-        # 使用LLM判断
-        provider = await self._get_detection_provider(event)
-        if not provider:
-            return False
-
-        prompt = f"""请判断以下用户消息是否是**日程设定**或**提醒请求**：
-
-用户消息："{message}"
-
-【判断标准】
-1. **必须包含明确的提醒意图**：用户希望在未来某个时间点被告知某事。
-2. **必须包含时间描述**：如“明天”、“下午3点”、“10分钟后”等。
-3. **必须包含事件内容**：要做的事情或被提醒的内容。
-
-【负面案例 - 请回复“否”】
-- “明天再说吧” (推脱/闲聊，无提醒意图)
-- “明天上号” (陈述计划，未要求提醒)
-- “下午去吃饭” (陈述事实)
-- “明天天气怎么样” (询问信息)
-- “我不确定明天有没有空” (不确定陈述)
-
-【正面案例 - 请回复“是”】
-- “明天早上叫我起床”
-- “下午3点提醒我开会”
-- “10分钟后喊我”
-- “记得下周一提醒我交报告”
-
-如果是日程/提醒请求，回复"是"，否则回复"否"。
-只需回复"是"或"否"，不要包含其他内容。"""
-
-        try:
-            response = await provider.text_chat(prompt=prompt)
-            result = response.completion_text.strip().lower()
-            return result in ["是", "是的", "yes", "true"]
-        except Exception as e:
-            logger.error(f"LLM判断日程触发时出错: {e}")
-            return False
+        # 如果关键词未匹配，说明在on_message预过滤时已拦截，这里不应该到达
+        return False
 
     async def _extract_schedule_info(
         self, message: str, event: AstrMessageEvent
@@ -918,25 +902,124 @@ class ReminderPlugin(Star):
             if schedule and schedule.status == ReminderStatus.PENDING.value:
                 short_id = schedule.short_id
 
+                # 发送提醒消息
                 await self._send_reminder(schedule)
 
-                # 更新数据库状态（异步执行）
-                await self._run_db_operation(
-                    self.db.update_schedule_status,
-                    schedule_id,
-                    ReminderStatus.TRIGGERED.value,
-                )
+                # 判断是否为循环日程
+                if schedule.is_recurring:
+                    # 计算下次触发时间
+                    next_trigger_time = self._calculate_next_trigger(schedule)
+                    
+                    if next_trigger_time:
+                        # 更新数据库中的触发时间和计数
+                        await self._run_db_operation(
+                            self.db.update_schedule_for_next_trigger,
+                            schedule_id,
+                            next_trigger_time,
+                            True  # increment_count
+                        )
+                        
+                        # 创建新的定时任务
+                        delay = next_trigger_time - time.time()
+                        if delay > 0:
+                            timer_task = asyncio.create_task(self._reminder_timer(delay, schedule_id))
+                            self.timers[schedule_id] = timer_task
+                            
+                            next_dt = datetime.fromtimestamp(next_trigger_time)
+                            logger.info(
+                                f"循环日程 {short_id} 已重新调度，下次触发: {next_dt.strftime('%Y-%m-%d %H:%M')}"
+                            )
+                    else:
+                        # 无法计算下次时间，标记为已触发
+                        await self._run_db_operation(
+                            self.db.update_schedule_status,
+                            schedule_id,
+                            ReminderStatus.TRIGGERED.value,
+                        )
+                        if schedule_id in self.timers:
+                            del self.timers[schedule_id]
+                        logger.warning(f"循环日程 {short_id} 无法计算下次触发时间，已结束")
+                else:
+                    # 一次性日程，标记为已触发
+                    await self._run_db_operation(
+                        self.db.update_schedule_status,
+                        schedule_id,
+                        ReminderStatus.TRIGGERED.value,
+                    )
 
-                # 清理内存中的定时任务引用
-                if schedule_id in self.timers:
-                    del self.timers[schedule_id]
+                    # 清理内存中的定时任务引用
+                    if schedule_id in self.timers:
+                        del self.timers[schedule_id]
 
-                logger.info(f"提醒 {short_id} 已触发并完成")
+                    logger.info(f"提醒 {short_id} 已触发并完成")
 
         except asyncio.CancelledError:
             logger.info(f"提醒任务 {schedule_id} 已被取消")
         except Exception as e:
             logger.error(f"提醒任务 {schedule_id} 执行出错: {e}")
+
+    def _calculate_next_trigger(self, schedule: ScheduleItem) -> Optional[float]:
+        """计算循环日程的下次触发时间
+        
+        Args:
+            schedule: 日程对象
+            
+        Returns:
+            下次触发的时间戳，如果无法计算则返回None
+        """
+        import calendar
+        
+        if not schedule.is_recurring:
+            return None
+            
+        current_trigger = datetime.fromtimestamp(schedule.trigger_time)
+        recurrence_type = schedule.recurrence_type
+        
+        try:
+            if recurrence_type == "daily":
+                # 每天：推进1天
+                next_dt = current_trigger + timedelta(days=1)
+                
+            elif recurrence_type == "weekly":
+                # 每周：推进7天
+                next_dt = current_trigger + timedelta(days=7)
+                
+            elif recurrence_type == "monthly":
+                # 每月：推进到下个月的同一天
+                recurrence_value = schedule.recurrence_value or str(current_trigger.day)
+                target_day = int(recurrence_value)
+                
+                # 计算下个月
+                if current_trigger.month == 12:
+                    next_year = current_trigger.year + 1
+                    next_month = 1
+                else:
+                    next_year = current_trigger.year
+                    next_month = current_trigger.month + 1
+                
+                # 处理月末日期（如31号在2月会变成28/29号）
+                max_day_in_next_month = calendar.monthrange(next_year, next_month)[1]
+                actual_day = min(target_day, max_day_in_next_month)
+                
+                next_dt = current_trigger.replace(
+                    year=next_year,
+                    month=next_month,
+                    day=actual_day
+                )
+                
+            elif recurrence_type == "yearly":
+                # 每年：推进1年
+                next_dt = current_trigger.replace(year=current_trigger.year + 1)
+                
+            else:
+                logger.warning(f"未知的循环类型: {recurrence_type}")
+                return None
+            
+            return next_dt.timestamp()
+            
+        except Exception as e:
+            logger.error(f"计算下次触发时间失败: {e}")
+            return None
 
     async def _send_reminder(self, schedule: ScheduleItem):
         """发送提醒消息"""
