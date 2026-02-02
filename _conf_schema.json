@@ -133,12 +133,6 @@
     "hint": "是否将日程数据持久化存储（重启后保留）",
     "default": true
   },
-  "user_alias": {
-    "description": "用户ID与称呼映射表",
-    "type": "list",
-    "hint": "每一项格式为：用户ID,称呼。例如：123456789,老板",
-    "default": []
-  },
   "reminder_persona": {
     "description": "当前启用的提醒人设",
     "type": "object",
