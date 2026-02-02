@@ -311,6 +311,21 @@ class ReminderPlugin(Star):
             return
 
         if result["success"]:
+            # 获取实际的触发时间并格式化
+            schedule = result.get("schedule")
+            if schedule:
+                trigger_dt = datetime.fromtimestamp(schedule.trigger_time)
+                now = datetime.now()
+                # 智能显示时间
+                if trigger_dt.date() == now.date():
+                    formatted_time = trigger_dt.strftime("%H:%M")
+                elif trigger_dt.date() == (now + timedelta(days=1)).date():
+                    formatted_time = f"明天 {trigger_dt.strftime('%H:%M')}"
+                else:
+                    formatted_time = trigger_dt.strftime("%m月%d日 %H:%M")
+                # 将格式化的时间添加到schedule_info中
+                schedule_info["formatted_time"] = formatted_time
+            
             # 生成人格化回复（带超时，失败时使用兜底回复）
             logger.info(f"[LLM监控模式] 步骤4: 生成确认回复...")
             try:
@@ -320,7 +335,7 @@ class ReminderPlugin(Star):
                 )
             except asyncio.TimeoutError:
                 logger.warning(f"[LLM监控模式] 生成确认回复超时，使用兜底回复")
-                response = f"✅ 好的，我会在{schedule_info.get('time', '指定时间')}提醒您：{schedule_info.get('event', '待办事项')}"
+                response = f"✅ 好的，我会在{schedule_info.get('formatted_time', schedule_info.get('time', '指定时间'))}提醒您：{schedule_info.get('event', '待办事项')}"
             except Exception as e:
                 logger.error(f"[LLM监控模式] 生成回复异常: {e}")
                 response = f"✅ 好的，我会在{schedule_info.get('time', '指定时间')}提醒您：{schedule_info.get('event', '待办事项')}"
@@ -954,6 +969,21 @@ class ReminderPlugin(Star):
         result = await self._create_schedule(event, schedule_info)
 
         if result["success"]:
+            # 获取实际的触发时间并格式化
+            schedule = result.get("schedule")
+            if schedule:
+                trigger_dt = datetime.fromtimestamp(schedule.trigger_time)
+                now = datetime.now()
+                # 智能显示时间
+                if trigger_dt.date() == now.date():
+                    formatted_time = trigger_dt.strftime("%H:%M")
+                elif trigger_dt.date() == (now + timedelta(days=1)).date():
+                    formatted_time = f"明天 {trigger_dt.strftime('%H:%M')}"
+                else:
+                    formatted_time = trigger_dt.strftime("%m月%d日 %H:%M")
+                # 将格式化的时间添加到schedule_info中
+                schedule_info["formatted_time"] = formatted_time
+            
             response = await self._generate_confirmation_response(schedule_info, event)
             yield event.plain_result(response)
         else:
@@ -1524,10 +1554,13 @@ class ReminderPlugin(Star):
         self, schedule_info: dict, event: AstrMessageEvent
     ) -> str:
         """生成日程确认回复"""
-        time_str = schedule_info.get("time", "指定时间")
+        # 优先使用格式化的时间，否则使用原始的自然语言描述
+        time_str = schedule_info.get("formatted_time", schedule_info.get("time", "指定时间"))
         event_content = schedule_info.get("event", "未知事件")
         target_id = schedule_info.get("target_id", "")
         sender_id = event.get_sender_id()
+        
+        logger.debug(f"[确认回复] 原始时间: {schedule_info.get('time')}, 格式化时间: {schedule_info.get('formatted_time')}, 使用时间: {time_str}")
 
         is_self = target_id == sender_id or not target_id
 
