@@ -35,7 +35,7 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_
     "astrbot_plugin_reminder",
     "findx010197",
     "智能日程提醒插件，支持LLM监控与指令双模式，循环日程，戳一戳",
-    "3.2.1",
+    "3.2.2",
     "https://github.com/findx010197/astrbot_plugin_reminder",
 )
 class ReminderPlugin(Star):
@@ -210,8 +210,10 @@ class ReminderPlugin(Star):
         self._message_dedup_cache[dedup_key] = current_time
 
         logger.info(f"[LLM监控模式] 关键词预匹配成功: {message_str}")
+        logger.debug(f"[LLM监控模式] 发送者: {sender_id}, 消息Hash: {message_hash}")
 
         # 第一步：使用 LLM 进一步确认是否为日程设定请求（带超时）
+        logger.info(f"[LLM监控模式] 步骤1: 开始判断是否为日程请求...")
         try:
             is_trigger = await asyncio.wait_for(
                 self._is_schedule_trigger(message_str, event),
@@ -219,26 +221,40 @@ class ReminderPlugin(Star):
             )
         except asyncio.TimeoutError:
             logger.warning(f"[LLM监控模式] LLM判断超时，跳过消息: {message_str[:50]}")
+            event.stop_event()  # 确保停止事件传播
+            return
+        except Exception as e:
+            logger.error(f"[LLM监控模式] LLM判断异常: {e}", exc_info=True)
+            event.stop_event()
             return
 
         if not is_trigger:
+            logger.info(f"[LLM监控模式] 不是日程请求，跳过")
             return  # 不是日程设定请求，继续其他处理
 
         logger.info(f"[LLM监控模式] 检测到日程设定请求: {message_str}")
 
         # 第二步：提取日程信息（带超时）
+        logger.info(f"[LLM监控模式] 步骤2: 开始提取日程信息...")
         try:
             schedule_info = await asyncio.wait_for(
                 self._extract_schedule_info(message_str, event),
                 timeout=15.0  # 15秒超时
             )
+            logger.info(f"[LLM监控模式] 提取结果: {schedule_info}")
         except asyncio.TimeoutError:
             logger.warning(f"[LLM监控模式] 提取日程信息超时")
             yield event.plain_result("抱歉，处理超时了，请稍后重试或使用指令模式 /callme")
             event.stop_event()
             return
+        except Exception as e:
+            logger.error(f"[LLM监控模式] 提取日程信息异常: {e}", exc_info=True)
+            yield event.plain_result("抱歉，处理出错了，请稍后重试")
+            event.stop_event()
+            return
 
         if not schedule_info:
+            logger.warning(f"[LLM监控模式] 无法解析日程信息: {message_str[:50]}")
             yield event.plain_result(
                 "抱歉，我无法理解您的日程请求，请提供更明确的时间和事件内容。"
             )
@@ -246,25 +262,37 @@ class ReminderPlugin(Star):
             return
 
         # 检查是否有 @ 对象
+        logger.info(f"[LLM监控模式] 步骤3: 检查@对象...")
         target_id, target_name = self._get_at_target(event)
         if target_id:
+            logger.info(f"[LLM监控模式] 找到@对象: {target_name} ({target_id})")
             schedule_info["target_id"] = target_id
             schedule_info["target_name"] = target_name
+        else:
+            logger.info(f"[LLM监控模式] 未找到@对象，默认为自己")
 
         # 第三步：创建日程（带超时）
+        logger.info(f"[LLM监控模式] 步骤4: 开始创建日程...")
         try:
             result = await asyncio.wait_for(
                 self._create_schedule(event, schedule_info),
                 timeout=20.0  # 20秒超时
             )
+            logger.info(f"[LLM监控模式] 创建结果: success={result.get('success')}")
         except asyncio.TimeoutError:
             logger.warning(f"[LLM监控模式] 创建日程超时")
             yield event.plain_result("抱歉，创建日程超时了，请稍后重试")
             event.stop_event()
             return
+        except Exception as e:
+            logger.error(f"[LLM监控模式] 创建日程异常: {e}", exc_info=True)
+            yield event.plain_result("抱歉，创建日程失败，请稍后重试")
+            event.stop_event()
+            return
 
         if result["success"]:
             # 生成人格化回复（带超时，失败时使用兜底回复）
+            logger.info(f"[LLM监控模式] 步骤5: 生成确认回复...")
             try:
                 response = await asyncio.wait_for(
                     self._generate_confirmation_response(schedule_info, event),
@@ -273,11 +301,17 @@ class ReminderPlugin(Star):
             except asyncio.TimeoutError:
                 logger.warning(f"[LLM监控模式] 生成确认回复超时，使用兜底回复")
                 response = f"✅ 好的，我会在{schedule_info.get('time', '指定时间')}提醒您：{schedule_info.get('event', '待办事项')}"
+            except Exception as e:
+                logger.error(f"[LLM监控模式] 生成回复异常: {e}")
+                response = f"✅ 好的，我会在{schedule_info.get('time', '指定时间')}提醒您：{schedule_info.get('event', '待办事项')}"
             yield event.plain_result(response)
+            logger.info(f"[LLM监控模式] 处理完成，已发送确认消息")
         else:
+            logger.warning(f"[LLM监控模式] 创建失败: {result['message']}")
             yield event.plain_result(result["message"])
 
         event.stop_event()
+        logger.info(f"[LLM监控模式] 事件处理完毕，已停止传播")
 
     def _clean_llm_response(self, text: str) -> str:
         """清洗LLM返回的文本，去除思考过程和废话"""

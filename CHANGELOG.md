@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v3.2.2] - 2026-02-02
+
+### Fixed
+- **[致命修复] LLM监控卡死问题**：
+  - 修复创建“提醒别人”类型日程时AstrBot控制界面卡死30秒问题
+  - 根本原因：`_extract_schedule_info`、`_create_schedule` 等函数缺少异常捕获
+  - 在所有超时和异常路径上添加 `event.stop_event()` 调用
+  - 确保事件不会继续传播导致系统等待超时
+
+### Improved
+- **增强日志追踪**：
+  - 在LLM监控流程的每个关键步骤添加详细日志
+  - 方便追踪处理进度和定位问题
+  - 日志包括：步骤开始、提取结果、@对象信息、创建结果等
+  - 异常情况使用 `exc_info=True` 输出完整堆栈
+
+- **优化异常处理**：
+  - 所有 `asyncio.wait_for` 超时后都调用 `event.stop_event()`
+  - 所有异常分支都添加用户友好的错误提示
+  - 确保任何情况下都不会阻塞事件循环
+
 ## [v3.2.1] - 2026-02-02
 
 ### Fixed
