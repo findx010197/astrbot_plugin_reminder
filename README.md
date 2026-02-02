@@ -1,35 +1,6 @@
 # AstrBot 智能日程提醒插件
 
-一个功能丰富的 AstrBot 日程提醒插件，支持 LLM 监控与指令双模式创建日程，基于人格生成提醒话语。**已集成uni_nickname插件，支持基于昵称的提醒。**
-
-## ⚠️ 重要依赖
-
-**本插件依赖于 [uni_nickname插件](https://github.com/Hakuin123/astrbot_plugin_uni_nickname) 来管理用户昵称。**
-
-### 安装uni_nickname插件
-
-```bash
-# 通过AstrBot插件市场安装
-# 或者手动克隆
-git clone https://github.com/Hakuin123/astrbot_plugin_uni_nickname.git
-```
-
-### 配置昵称映射
-
-```bash
-# 管理员设置昵称（需要管理员权限）
-/nickname set <用户QQ号> <昵称>
-
-# 示例
-/nickname set 3342496519 小龙
-/nickname set 123456789 老板
-
-# 用户自己设置昵称
-/nickname setme <昵称>
-
-# 查看所有昵称映射
-/nickname list
-```
+一个功能丰富的 AstrBot 日程提醒插件，支持 LLM 监控与指令双模式创建日程，基于人格生成提醒话语。
 
 ## ✨ 功能特点
 
@@ -39,8 +10,7 @@ git clone https://github.com/Hakuin123/astrbot_plugin_uni_nickname.git
 - 自动监控用户消息，通过 LLM 判断是否为日程设定请求
 - 支持关键词快速匹配（如"提醒我"、"设置提醒"等）
 - 智能提取时间和事件内容
-- **支持基于昵称的提醒**（推荐）：`提醒 小龙 明天开会`
-- 兼容@提醒方式：`提醒 @小龙 明天开会`
+- 仅支持提醒自己（简单可靠）
 
 **指令模式：**
 - `/callme <时间> <事件>` - 快速创建提醒
@@ -101,7 +71,24 @@ git clone https://github.com/findx010197/astrbot_plugin_reminder.git
 | `quick_time_presets` | 快捷时间预设 | 见下方 |
 | `default_time_points` | 各时段默认时间点 | 见下方 |
 | `trigger_keywords` | 触发关键词列表 | ["提醒我", ...] |
+| `user_alias` | 用户昵称映射 | [] |
 | `data_persistence` | 是否持久化存储 | true |
+
+### 用户昵称映射
+
+```json
+{
+  "user_alias": [
+    "1498976088,小明",
+    "123456789,老板",
+    "987654321,小王"
+  ]
+}
+```
+
+格式：`"用户QQ号,昵称"`
+
+此昵称将在提醒消息中使用，格式：`@用户 昵称 时间到了~`
 
 ### 快捷时间预设
 
@@ -128,32 +115,28 @@ git clone https://github.com/findx010197/astrbot_plugin_reminder.git
 
 ## 📝 使用示例
 
-### 基于昵称的提醒（推荐新方式）✨
+### LLM监控模式
 ```
-用户: 提醒 小龙 明天早上开会
-Bot: 好的，我会在明天早上8点提醒小龙开会哦~
+用户: 提醒我明天早上开会
+Bot: 好的，我会在明天早上8点提醒您开会哦~
 
-用户: axx提醒 老板 10分钟后 提交报告
-Bot: 收到！10分钟后我会提醒老板提交报告的~
-```
-
-### 传统@提醒方式（兼容）
-```
-用户: 提醒 @小龙 明天早上开会
-Bot: 好的，我会在明天早上8点提醒小龙开会哦~
+（到时触发）
+Bot: [戳一戳]
+     @用户 小明 早上8点到了，该去开会啦~
 ```
 
 ### 指令模式
 ```
 用户: /callme 10分钟后 喝水
-Bot: 收到！10分钟后我会提醒您喝水的~
+Bot: ✅ 一次性提醒已创建
+     📌 喝水
+     ⏰ 2月2日 15:40
+     🏷️ R0001
 
 用户: /callme list
 Bot: 📋 您的提醒列表：
-     1. [01月30日 08:00] 开会
-        ID: 12345678...
-     2. [01月29日 15:30] 喝水
-        ID: 87654321...
+     1. [02/02 15:40] 喝水
+        ID: R0001
 ```
 
 ## 🔧 环境要求
