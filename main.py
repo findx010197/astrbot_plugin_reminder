@@ -188,7 +188,10 @@ class ReminderPlugin(Star):
         )
 
         # 如果不包含任何触发关键词，直接跳过（不调用 LLM）
-        has_trigger_keyword = any(keyword in message_str for keyword in trigger_keywords)
+        # 注意：移除@符号和CQ码后再检查，避免@影响关键词匹配
+        clean_msg = re.sub(r'\[CQ:.*?\]', '', message_str)  # 移除CQ码
+        clean_msg = re.sub(r'@\S+', '', clean_msg)  # 移除@提及
+        has_trigger_keyword = any(keyword in message_str or keyword in clean_msg for keyword in trigger_keywords)
         if not has_trigger_keyword:
             return  # 快速返回，避免 LLM 调用
 
@@ -434,7 +437,11 @@ class ReminderPlugin(Star):
             ],
         )
 
-        if any(keyword in message for keyword in trigger_keywords):
+        # 移除CQ码和@符号后再检查，避免它们干扰关键词匹配
+        clean_msg = re.sub(r'\[CQ:.*?\]', '', message)
+        clean_msg = re.sub(r'@\S+', '', clean_msg)
+        
+        if any(keyword in message or keyword in clean_msg for keyword in trigger_keywords):
             logger.info(f"通过关键词匹配触发日程设定: {message}")
             return True  # 直接返回，不调用LLM
 
@@ -455,16 +462,29 @@ class ReminderPlugin(Star):
             search_info = await self._search_for_schedule(message, event)
 
         current_time = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S 星期%w")
+        
+        # 检查消息中是否有@（At组件或文本中的@）
+        has_at = False
+        for component in event.message_obj.message:
+            if isinstance(component, At):
+                has_at = True
+                break
+        if not has_at and '@' in message:
+            has_at = True
+        
+        at_hint = ""
+        if has_at:
+            at_hint = "\n注意：消息中包含@某人，这表示用户想提醒另一个人，而不是提醒自己。target字段应填写被@的人（如果无法确定名字，填'被@的人'）。"
 
         prompt = f"""请从以下用户消息中提取日程关键信息，并以JSON格式返回：
 用户消息："{message}"
 当前时间：{current_time}
-{f"网络搜索补充信息：{search_info}" if search_info else ""}
+{f"网络搜索补充信息：{search_info}" if search_info else ""}{at_hint}
 
 请提取以下信息：
 1. time: 提醒的具体时间描述（如：明天下午3点、10分钟后、下周一早上9点等）
-2. event: 要提醒的事件内容（用简洁的语言描述）
-3. target: 提醒的目标对象（如果有的话，没有则填"用户"）
+2. event: 要提醒的事件内容（用简洁的语言描述，去除@某人等格式符号）
+3. target: 提醒的目标对象（如果消息中有@某人或明确提到提醒别人，填写被提醒者；否则填"用户"表示提醒自己）
 
 请严格按照以下JSON格式返回，不要包含其他内容：
 {{
@@ -1262,6 +1282,12 @@ class ReminderPlugin(Star):
             if schedule.target_id:
                 chain.append(At(qq=int(schedule.target_id)))  # 修复：使用int类型
                 chain.append(Plain(" "))  # At后加个空格
+                
+                # 添加固定的昵称文本（使用配置映射）
+                target_display = self._get_user_display_name(
+                    schedule.target_id, schedule.target_name
+                )
+                chain.append(Plain(f"{target_display} "))  # 昵称+空格
 
             chain.append(Plain(message))
             
