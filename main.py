@@ -558,14 +558,37 @@ class ReminderPlugin(Star):
         pass
 
     @callme_group.command("list")
-    async def list_reminders(self, event: AstrMessageEvent):
+    async def list_reminders(self, event: AstrMessageEvent, option: str = ""):
         """查看我的提醒列表
 
-        用法: /callme list
+        用法: 
+        - /callme list - 显示菜单
+        - /callme list all - 查看所有日程
+        - /callme list today - 查看今日日程
+        - /callme list recurring - 查看循环日程
         """
         sender_id = event.get_sender_id()
+        option = option.lower().strip()
 
-        # 从数据库获取用户的待执行日程（异步执行）
+        # 如果没有参数，显示引导菜单
+        if not option:
+            yield event.plain_result(
+                "📋 提醒列表查询\n\n"
+                "请选择查看内容：\n"
+                "╭─────────────────╮\n"
+                "│ 🔸 /callme list all       │\n"
+                "│    查看所有日程           │\n"
+                "│                           │\n"
+                "│ 🔸 /callme list today     │\n"
+                "│    查看今日日程           │\n"
+                "│                           │\n"
+                "│ 🔸 /callme list recurring │\n"
+                "│    查看循环日程           │\n"
+                "╰─────────────────╯"
+            )
+            return
+
+        # 获取用户的待执行日程
         user_schedules = await self._run_db_operation(
             self.db.get_user_pending_schedules, sender_id
         )
@@ -574,16 +597,51 @@ class ReminderPlugin(Star):
             yield event.plain_result("📭 您当前没有待执行的提醒哦~")
             return
 
+        now = datetime.now()
+
+        # 根据选项过滤日程
+        if option in ["today", "今天", "今日"]:
+            # 只显示今天的日程
+            filtered_schedules = [
+                s for s in user_schedules 
+                if datetime.fromtimestamp(s.trigger_time).date() == now.date()
+            ]
+            title = "📅 今日日程"
+            if not filtered_schedules:
+                yield event.plain_result("📭 今天没有待执行的提醒哦~")
+                return
+        elif option in ["recurring", "recur", "循环", "repeat"]:
+            # 只显示循环日程
+            filtered_schedules = [s for s in user_schedules if s.is_recurring]
+            # 按类型和时间排序：每天 > 每周 > 每月，同类型按时间排序
+            type_order = {"daily": 1, "weekly": 2, "monthly": 3, "yearly": 4, "none": 5}
+            filtered_schedules.sort(key=lambda s: (
+                type_order.get(s.recurrence_type, 5),
+                s.recurrence_time or "00:00"
+            ))
+            title = "🔁 循环日程"
+            if not filtered_schedules:
+                yield event.plain_result("📭 您当前没有循环日程哦~")
+                return
+        elif option in ["all", "所有", "全部"]:
+            # 显示所有日程
+            filtered_schedules = user_schedules
+            title = "📋 所有日程"
+        else:
+            yield event.plain_result(
+                f"❌ 未知选项: {option}\n\n"
+                "可用选项：all（所有）、today（今日）、recurring（循环）"
+            )
+            return
+
         # 构建美观的列表
         result_lines = [
             "╔═══════════════════════════╗",
-            "║     📋 我的提醒列表       ║",
+            f"║     {title}       ║",
             "╠═══════════════════════════╣",
         ]
 
-        now = datetime.now()
-
-        for i, schedule in enumerate(user_schedules, 1):
+        for i, schedule in enumerate(filtered_schedules, 1):
             trigger_dt = datetime.fromtimestamp(schedule.trigger_time)
 
             # 智能显示时间
@@ -602,6 +660,17 @@ class ReminderPlugin(Star):
             if len(event_text) > 12:
                 event_text = event_text[:11] + "…"
 
+            # 循环标记
+            recurrence_mark = ""
+            if schedule.is_recurring:
+                recurrence_map = {
+                    "daily": "🔁每天",
+                    "weekly": f"🔁每周{['','一','二','三','四','五','六','日'][int(schedule.recurrence_value or '1')]}",
+                    "monthly": f"🔁每月{schedule.recurrence_value}号",
+                    "yearly": "🔁每年"
+                }
+                recurrence_mark = " " + recurrence_map.get(schedule.recurrence_type, "🔁")
+
             # 目标用户标识
             target_mark = ""
             if schedule.target_id and schedule.target_id != schedule.sender_id:
@@ -612,16 +681,16 @@ class ReminderPlugin(Star):
                 )
 
             # 格式化每行
-            result_lines.append(f"║ {schedule.short_id} │ {time_str}")
+            result_lines.append(f"║ {schedule.short_id} │ {time_str}{recurrence_mark}")
             result_lines.append(f"║      └─ {event_text}{target_mark}")
 
-            if i < len(user_schedules):
+            if i < len(filtered_schedules):
                 result_lines.append("║ ─────────────────────────")
 
         result_lines.append("╚═══════════════════════════╝")
         result_lines.append("")
         result_lines.append("💡 取消提醒: /callme cancel <ID>")
-        result_lines.append(f"   如: /callme cancel {user_schedules[0].short_id}")
+        result_lines.append(f"   如: /callme cancel {filtered_schedules[0].short_id}")
 
         yield event.plain_result("\n".join(result_lines))
 
@@ -1076,6 +1145,8 @@ class ReminderPlugin(Star):
         recurrence_type = schedule_info.get("recurrence", "none")
         recurrence_value = schedule_info.get("recurrence_value", "")
         recurrence_time = schedule_info.get("recurrence_time", "")
+        
+        logger.info(f"[创建日程] 循环信息: type={recurrence_type}, value={recurrence_value}, time={recurrence_time}")
 
         # 创建日程对象
         schedule = ScheduleItem(
@@ -1127,16 +1198,22 @@ class ReminderPlugin(Star):
 
             if schedule and schedule.status == ReminderStatus.PENDING.value:
                 short_id = schedule.short_id
+                
+                logger.info(f"[提醒器] 开始处理日程 {short_id}, 是否循环: {schedule.is_recurring}, 类型: {schedule.recurrence_type}")
 
                 # 发送提醒消息
                 await self._send_reminder(schedule)
 
                 # 判断是否为循环日程
                 if schedule.is_recurring:
+                    logger.info(f"[循环日程] {short_id} 开始计算下次触发时间")
                     # 计算下次触发时间
                     next_trigger_time = self._calculate_next_trigger(schedule)
                     
                     if next_trigger_time:
+                        next_dt = datetime.fromtimestamp(next_trigger_time)
+                        logger.info(f"[循环日程] {short_id} 下次触发时间: {next_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+                        
                         # 更新数据库中的触发时间和计数
                         await self._run_db_operation(
                             self.db.update_schedule_for_next_trigger,
@@ -1145,15 +1222,16 @@ class ReminderPlugin(Star):
                             True  # increment_count
                         )
                         
+                        logger.info(f"[循环日程] {short_id} 数据库已更新，触发计数: {schedule.trigger_count + 1}")
+                        
                         # 创建新的定时任务
                         delay = next_trigger_time - time.time()
                         if delay > 0:
                             timer_task = asyncio.create_task(self._reminder_timer(delay, schedule_id))
                             self.timers[schedule_id] = timer_task
                             
-                            next_dt = datetime.fromtimestamp(next_trigger_time)
                             logger.info(
-                                f"循环日程 {short_id} 已重新调度，下次触发: {next_dt.strftime('%Y-%m-%d %H:%M')}"
+                                f"[循环日程] {short_id} 已重新调度，下次触发: {next_dt.strftime('%Y-%m-%d %H:%M')}"
                             )
                     else:
                         # 无法计算下次时间，标记为已触发
@@ -1196,24 +1274,31 @@ class ReminderPlugin(Star):
         import calendar
         
         if not schedule.is_recurring:
+            logger.warning(f"[计算下次触发] 日程 {schedule.short_id} 不是循环日程，recurrence_type={schedule.recurrence_type}")
             return None
             
         current_trigger = datetime.fromtimestamp(schedule.trigger_time)
         recurrence_type = schedule.recurrence_type
         
+        logger.info(f"[计算下次触发] 日程 {schedule.short_id}, 类型: {recurrence_type}, 当前触发: {current_trigger.strftime('%Y-%m-%d %H:%M:%S')}")
+        
         try:
             if recurrence_type == "daily":
                 # 每天：推进1天
                 next_dt = current_trigger + timedelta(days=1)
+                logger.info(f"[计算下次触发] 每天模式，下次: {next_dt.strftime('%Y-%m-%d %H:%M:%S')}")
                 
             elif recurrence_type == "weekly":
                 # 每周：推进7天
                 next_dt = current_trigger + timedelta(days=7)
+                logger.info(f"[计算下次触发] 每周模式，下次: {next_dt.strftime('%Y-%m-%d %H:%M:%S')}")
                 
             elif recurrence_type == "monthly":
                 # 每月：推进到下个月的同一天
                 recurrence_value = schedule.recurrence_value or str(current_trigger.day)
                 target_day = int(recurrence_value)
+                
+                logger.info(f"[计算下次触发] 每月模式，目标日期: {target_day}号")
                 
                 # 计算下个月
                 if current_trigger.month == 12:
@@ -1233,18 +1318,23 @@ class ReminderPlugin(Star):
                     day=actual_day
                 )
                 
+                logger.info(f"[计算下次触发] 每月模式，下次: {next_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+                
             elif recurrence_type == "yearly":
                 # 每年：推进1年
                 next_dt = current_trigger.replace(year=current_trigger.year + 1)
+                logger.info(f"[计算下次触发] 每年模式，下次: {next_dt.strftime('%Y-%m-%d %H:%M:%S')}")
                 
             else:
                 logger.warning(f"未知的循环类型: {recurrence_type}")
                 return None
             
-            return next_dt.timestamp()
+            result_timestamp = next_dt.timestamp()
+            logger.info(f"[计算下次触发] 成功计算，返回时间戳: {result_timestamp}")
+            return result_timestamp
             
         except Exception as e:
-            logger.error(f"计算下次触发时间失败: {e}")
+            logger.error(f"计算下次触发时间失败: {e}", exc_info=True)
             return None
 
     async def _send_poke_reminder(self, schedule: ScheduleItem):
