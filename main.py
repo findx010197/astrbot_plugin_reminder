@@ -12,6 +12,7 @@ from astrbot.api import logger, AstrBotConfig
 from astrbot.core.message.components import Plain, At, Record
 
 import asyncio
+import calendar
 import concurrent.futures
 import json
 import os
@@ -291,11 +292,59 @@ class ReminderPlugin(Star):
         # LLM监控模式只支持提醒自己，不处理@对象
         logger.info(f"[LLM监控模式] 创建自己的提醒日程...")
         
+        # 如果是循环日程，计算首次触发时间
+        preset_trigger_time = None
+        if schedule_info.get("recurrence") and schedule_info.get("recurrence") != "none":
+            logger.info(f"[LLM监控模式] 检测到循环日程，计算首次触发时间...")
+            try:
+                recurrence_type = schedule_info.get("recurrence")
+                recurrence_time = schedule_info.get("recurrence_time", "09:00")
+                recurrence_value = schedule_info.get("recurrence_value", "")
+                
+                now = datetime.now()
+                hour, minute = map(int, recurrence_time.split(':'))
+                
+                if recurrence_type == "daily":
+                    # 每天：今天或明天
+                    trigger_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if trigger_dt <= now:
+                        trigger_dt += timedelta(days=1)
+                elif recurrence_type == "weekly":
+                    # 每周：计算下个对应星期几
+                    target_weekday = int(recurrence_value) - 1  # 转为 0-6
+                    if target_weekday < 0:
+                        target_weekday = 6
+                    days_ahead = target_weekday - now.weekday()
+                    if days_ahead < 0 or (days_ahead == 0 and now.hour * 60 + now.minute >= hour * 60 + minute):
+                        days_ahead += 7
+                    trigger_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    trigger_dt += timedelta(days=days_ahead)
+                elif recurrence_type == "monthly":
+                    # 每月：计算下个对应日期
+                    target_day = int(recurrence_value)
+                    trigger_dt = now.replace(day=min(target_day, calendar.monthrange(now.year, now.month)[1]),
+                                            hour=hour, minute=minute, second=0, microsecond=0)
+                    if trigger_dt <= now:
+                        # 推到下个月
+                        if now.month == 12:
+                            trigger_dt = trigger_dt.replace(year=now.year + 1, month=1)
+                        else:
+                            max_day = calendar.monthrange(now.year, now.month + 1)[1]
+                            trigger_dt = trigger_dt.replace(month=now.month + 1, day=min(target_day, max_day))
+                else:
+                    trigger_dt = now + timedelta(days=1)
+                    trigger_dt = trigger_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                
+                preset_trigger_time = trigger_dt.timestamp()
+                logger.info(f"[LLM监控模式] 循环日程首次触发时间: {trigger_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception as e:
+                logger.error(f"[LLM监控模式] 计算循环日程触发时间失败: {e}", exc_info=True)
+        
         # 第三步：创建日程（带超时）
         logger.info(f"[LLM监控模式] 步骤3: 开始创建日程...")
         try:
             result = await asyncio.wait_for(
-                self._create_schedule(event, schedule_info),
+                self._create_schedule(event, schedule_info, preset_trigger_time),
                 timeout=20.0  # 20秒超时
             )
             logger.info(f"[LLM监控模式] 创建结果: success={result.get('success')}")
@@ -508,12 +557,25 @@ class ReminderPlugin(Star):
 1. time: 提醒的具体时间描述（如：明天下午3点、10分钟后、下周一早上9点等）
 2. event: 要提醒的事件内容（用简洁的语言描述）
 3. target: 提醒的目标对象（LLM监控模式固定填"用户"，表示提醒自己）
+4. is_recurring: 是否为循环日程（true/false）
+   - 如果消息中包含"每天"、"每周"、"每月"等循环关键词，则为true
+5. recurrence_type: 循环类型（仅当is_recurring为true时填写）
+   - "daily" - 每天
+   - "weekly" - 每周
+   - "monthly" - 每月
+6. recurrence_detail: 循环详情（仅当is_recurring为true时填写）
+   - 对于每周：填写星期几（如"一"、"五"）
+   - 对于每月：填写几号（如"15"）
+   - 对于每天：留空
 
 请严格按照以下JSON格式返回，不要包含其他内容：
 {{
     "time": "时间描述",
     "event": "事件内容",
-    "target": "目标对象"
+    "target": "目标对象",
+    "is_recurring": false,
+    "recurrence_type": "",
+    "recurrence_detail": ""
 }}"""
 
         try:
@@ -537,6 +599,60 @@ class ReminderPlugin(Star):
 
             if "time" in schedule_info and "event" in schedule_info:
                 schedule_info["search_info"] = search_info
+                
+                # 处理循环日程
+                if schedule_info.get("is_recurring", False):
+                    recurrence_type = schedule_info.get("recurrence_type", "").lower()
+                    recurrence_detail = schedule_info.get("recurrence_detail", "")
+                    
+                    logger.info(f"[提取信息] 检测到循环日程: type={recurrence_type}, detail={recurrence_detail}")
+                    
+                    # 解析时间字符串获取具体时间点
+                    time_desc = schedule_info.get("time", "")
+                    time_match = re.search(r'(\d{1,2})[点时:：](\d{0,2})', time_desc)
+                    if time_match:
+                        hour = time_match.group(1)
+                        minute = time_match.group(2) or "00"
+                        recurrence_time = f"{hour}:{minute.zfill(2)}"
+                    else:
+                        # 尝试从早上/中午/下午/晚上等时段推断
+                        if "早上" in time_desc or "早晨" in time_desc:
+                            recurrence_time = "08:00"
+                        elif "中午" in time_desc:
+                            recurrence_time = "12:00"
+                        elif "下午" in time_desc:
+                            recurrence_time = "14:00"
+                        elif "晚上" in time_desc:
+                            recurrence_time = "19:00"
+                        else:
+                            recurrence_time = "09:00"
+                    
+                    # 设置循环参数
+                    if recurrence_type == "daily":
+                        schedule_info["recurrence"] = "daily"
+                        schedule_info["recurrence_value"] = ""
+                        schedule_info["recurrence_time"] = recurrence_time
+                    elif recurrence_type == "weekly":
+                        # 解析星期几
+                        weekday_map = {
+                            "一": "1", "1": "1", "周一": "1", "星期一": "1",
+                            "二": "2", "2": "2", "周二": "2", "星期二": "2",
+                            "三": "3", "3": "3", "周三": "3", "星期三": "3",
+                            "四": "4", "4": "4", "周四": "4", "星期四": "4",
+                            "五": "5", "5": "5", "周五": "5", "星期五": "5",
+                            "六": "6", "6": "6", "周六": "6", "星期六": "6",
+                            "日": "7", "天": "7", "7": "7", "周日": "7", "星期日": "7",
+                        }
+                        schedule_info["recurrence"] = "weekly"
+                        schedule_info["recurrence_value"] = weekday_map.get(recurrence_detail, "1")
+                        schedule_info["recurrence_time"] = recurrence_time
+                    elif recurrence_type == "monthly":
+                        schedule_info["recurrence"] = "monthly"
+                        schedule_info["recurrence_value"] = recurrence_detail
+                        schedule_info["recurrence_time"] = recurrence_time
+                    
+                    logger.info(f"[提取信息] 循环日程参数: recurrence={schedule_info.get('recurrence')}, value={schedule_info.get('recurrence_value')}, time={recurrence_time}")
+                
                 logger.debug(f"[提取信息] 成功提取: {schedule_info}")
                 return schedule_info
 
@@ -868,7 +984,6 @@ class ReminderPlugin(Star):
             trigger_dt += timedelta(days=days_ahead)
         elif recurrence_type == "monthly":
             # 每月：计算下个对应日期
-            import calendar
             target_day = int(recurrence_value)
             trigger_dt = now.replace(day=min(target_day, calendar.monthrange(now.year, now.month)[1]),
                                      hour=hour, minute=minute, second=0, microsecond=0)
@@ -1271,7 +1386,6 @@ class ReminderPlugin(Star):
         Returns:
             下次触发的时间戳，如果无法计算则返回None
         """
-        import calendar
         
         if not schedule.is_recurring:
             logger.warning(f"[计算下次触发] 日程 {schedule.short_id} 不是循环日程，recurrence_type={schedule.recurrence_type}")

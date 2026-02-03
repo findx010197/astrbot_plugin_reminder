@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v3.3.4] - 2026-02-03
+
+### Fixed
+- **修复LLM监控模式循环日程创建失败**：
+  - 修复LLM监控模式下无法正确识别循环日程的BUG（"每天早上九点二十"被识别为type=none）
+  - LLM提示词增强：现在明确要求LLM提取`is_recurring`、`recurrence_type`、`recurrence_detail`字段
+  - 增加循环日程参数解析逻辑：自动识别"每天"/"每周"/"每月"关键词
+  - 增加时间提取正则：从"九点二十"等自然语言中提取"09:20"
+  - 增加首次触发时间计算：LLM模式现在和`/callme every`命令一样正确计算首次触发时间
+
+### Improved
+- **代码优化**：
+  - 将`calendar`模块移到文件顶部统一导入
+  - 移除多处重复的局部`import calendar`
+  - 增强循环日程创建的调试日志
+
 ## [v3.3.3] - 2026-02-03
 
 ### Added
