@@ -519,6 +519,38 @@ class ReminderPlugin(Star):
         # 如果关键词未匹配，说明在on_message预过滤时已拦截，这里不应该到达
         return False
 
+    def _convert_chinese_number(self, text: str) -> str:
+        """转换中文数字为阿拉伯数字
+        
+        Args:
+            text: 包含中文数字的文本
+            
+        Returns:
+            转换后的文本
+        """
+        # 先处理特殊的"十"组合（必须在单个数字转换之前）
+        # 处理"二十"到"九十"
+        for i in range(2, 10):
+            chinese_num = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'][i]
+            text = text.replace(f"{chinese_num}十", str(i * 10))
+        
+        # 处理单独的"十"（10）
+        text = text.replace("十", "10")
+        
+        # 处理单个数字
+        chinese_to_arabic = {
+            '零': '0', '一': '1', '二': '2', '三': '3', '四': '4',
+            '五': '5', '六': '6', '七': '7', '八': '8', '九': '9'
+        }
+        
+        for chinese, arabic in chinese_to_arabic.items():
+            text = text.replace(chinese, arabic)
+        
+        # 处理"半"（30分钟）
+        text = text.replace("半", "30")
+        
+        return text
+
     async def _extract_schedule_info(
         self, message: str, event: AstrMessageEvent
     ) -> Optional[dict]:
@@ -609,11 +641,27 @@ class ReminderPlugin(Star):
                     
                     # 解析时间字符串获取具体时间点
                     time_desc = schedule_info.get("time", "")
-                    time_match = re.search(r'(\d{1,2})[点时:：](\d{0,2})', time_desc)
+                    
+                    # 先转换中文数字为阿拉伯数字
+                    time_desc_converted = self._convert_chinese_number(time_desc)
+                    logger.debug(f"[提取信息] 时间描述转换: '{time_desc}' -> '{time_desc_converted}'")
+                    
+                    # 尝试匹配时间（支持"5点50"、"17:50"等格式）
+                    time_match = re.search(r'(\d{1,2})[点时:：](\d{0,2})', time_desc_converted)
                     if time_match:
-                        hour = time_match.group(1)
-                        minute = time_match.group(2) or "00"
-                        recurrence_time = f"{hour}:{minute.zfill(2)}"
+                        hour = int(time_match.group(1))
+                        minute = int(time_match.group(2) or "0")
+                        
+                        # 处理12小时制转换
+                        if "下午" in time_desc or "晚上" in time_desc:
+                            if hour < 12:
+                                hour += 12
+                        elif "早上" in time_desc or "早晨" in time_desc or "上午" in time_desc:
+                            if hour == 12:
+                                hour = 0
+                        
+                        recurrence_time = f"{hour:02d}:{minute:02d}"
+                        logger.info(f"[提取信息] 时间解析成功: {time_desc} -> {recurrence_time}")
                     else:
                         # 尝试从早上/中午/下午/晚上等时段推断
                         if "早上" in time_desc or "早晨" in time_desc:
@@ -626,6 +674,7 @@ class ReminderPlugin(Star):
                             recurrence_time = "19:00"
                         else:
                             recurrence_time = "09:00"
+                        logger.warning(f"[提取信息] 无法从'{time_desc}'中提取时间，使用默认: {recurrence_time}")
                     
                     # 设置循环参数
                     if recurrence_type == "daily":
