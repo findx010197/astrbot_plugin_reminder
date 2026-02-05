@@ -823,7 +823,6 @@ class ReminderPlugin(Star):
                         # 检查是否包含多个星期（用顿号、逗号或"和"分隔）
                         if any(sep in recurrence_detail for sep in ['、', '，', ',', '和', '及']):
                             # 解析多个星期值
-                            import re
                             # 分割字符串，支持、，, 和 及等分隔符
                             weekdays = re.split(r'[、，,和及]+', recurrence_detail)
                             weekday_values = []
