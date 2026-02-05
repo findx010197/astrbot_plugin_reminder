@@ -292,6 +292,87 @@ class ReminderPlugin(Star):
         # LLM监控模式只支持提醒自己，不处理@对象
         logger.info(f"[LLM监控模式] 创建自己的提醒日程...")
         
+        # 检查是否为工作日多星期循环（需要创建多个日程）
+        if schedule_info.get("recurrence") == "weekly_multiple":
+            weekday_values = schedule_info.get("recurrence_value", "").split(",")
+            logger.info(f"[LLM监控模式] 检测到工作日循环，需要创建{len(weekday_values)}个日程: {weekday_values}")
+            
+            created_schedules = []
+            failed_count = 0
+            
+            for weekday in weekday_values:
+                # 为每个星期创建独立的日程
+                single_schedule_info = schedule_info.copy()
+                single_schedule_info["recurrence"] = "weekly"
+                single_schedule_info["recurrence_value"] = weekday
+                
+                # 计算该星期的首次触发时间
+                try:
+                    recurrence_time = single_schedule_info.get("recurrence_time", "09:00")
+                    now = datetime.now()
+                    hour, minute = map(int, recurrence_time.split(':'))
+                    
+                    target_weekday = int(weekday) - 1  # 转为 0-6
+                    if target_weekday < 0:
+                        target_weekday = 6
+                    days_ahead = target_weekday - now.weekday()
+                    if days_ahead < 0 or (days_ahead == 0 and now.hour * 60 + now.minute >= hour * 60 + minute):
+                        days_ahead += 7
+                    trigger_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    trigger_dt += timedelta(days=days_ahead)
+                    preset_trigger_time = trigger_dt.timestamp()
+                    
+                    logger.info(f"[LLM监控模式] 星期{weekday}首次触发: {trigger_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+                except Exception as e:
+                    logger.error(f"[LLM监控模式] 计算星期{weekday}触发时间失败: {e}")
+                    preset_trigger_time = None
+                
+                # 创建日程
+                try:
+                    result = await asyncio.wait_for(
+                        self._create_schedule(event, single_schedule_info, preset_trigger_time),
+                        timeout=20.0
+                    )
+                    if result["success"]:
+                        created_schedules.append(result.get("schedule"))
+                        logger.info(f"[LLM监控模式] 星期{weekday}日程创建成功")
+                    else:
+                        failed_count += 1
+                        logger.warning(f"[LLM监控模式] 星期{weekday}日程创建失败: {result.get('message')}")
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(f"[LLM监控模式] 星期{weekday}日程创建异常: {e}")
+            
+            # 生成工作日循环的确认消息
+            if created_schedules:
+                weekday_names = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "日"}
+                weekdays_str = "、".join([f"周{weekday_names[int(w)]}" for w in weekday_values])
+                recurrence_time = schedule_info.get("recurrence_time", "09:00")
+                event_content = schedule_info.get("event", "待办事项")
+                
+                logger.info(f"[LLM监控模式] 步骤4: 生成工作日确认回复...")
+                try:
+                    # 生成人格化回复
+                    response = await asyncio.wait_for(
+                        self._generate_confirmation_response(schedule_info, event),
+                        timeout=10.0
+                    )
+                except:
+                    response = f"✅ 好的，我已为您设置了工作日提醒\n每{weekdays_str} {recurrence_time} 提醒您：{event_content}\n共创建了{len(created_schedules)}个循环日程"
+                
+                if failed_count > 0:
+                    response += f"\n⚠️ 其中{failed_count}个日程创建失败"
+                
+                yield event.plain_result(response)
+                logger.info(f"[LLM监控模式] 工作日循环创建完成: {len(created_schedules)}个成功，{failed_count}个失败")
+            else:
+                yield event.plain_result("❌ 创建工作日循环失败，请稍后重试")
+            
+            event.stop_event()
+            logger.info(f"[LLM监控模式] 工作日循环处理完毕")
+            return
+        
+        # 单个循环日程或一次性日程
         # 如果是循环日程，计算首次触发时间
         preset_trigger_time = None
         if schedule_info.get("recurrence") and schedule_info.get("recurrence") != "none":
@@ -528,16 +609,29 @@ class ReminderPlugin(Star):
         Returns:
             转换后的文本
         """
-        # 先处理特殊的"十"组合（必须在单个数字转换之前）
-        # 处理"二十"到"九十"
+        # 第一步：处理"X十Y"形式（21-29, 31-39, ..., 91-99）
+        # 必须最先处理，避免被拆分
+        for tens in range(2, 10):
+            tens_char = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'][tens]
+            for ones in range(1, 10):
+                ones_char = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'][ones]
+                # 例如："四十五" -> "45"
+                text = text.replace(f"{tens_char}十{ones_char}", str(tens * 10 + ones))
+        
+        # 第二步：处理"十X"（11-19）
+        for ones in range(1, 10):
+            ones_char = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'][ones]
+            text = text.replace(f"十{ones_char}", str(10 + ones))
+        
+        # 第三步：处理"X十"（20, 30, ...90）
         for i in range(2, 10):
             chinese_num = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'][i]
             text = text.replace(f"{chinese_num}十", str(i * 10))
         
-        # 处理单独的"十"（10）
+        # 第四步：处理单独的"十"（10）
         text = text.replace("十", "10")
         
-        # 处理单个数字
+        # 第五步：处理单个数字
         chinese_to_arabic = {
             '零': '0', '一': '1', '二': '2', '三': '3', '四': '4',
             '五': '5', '六': '6', '七': '7', '八': '8', '九': '9'
@@ -546,7 +640,36 @@ class ReminderPlugin(Star):
         for chinese, arabic in chinese_to_arabic.items():
             text = text.replace(chinese, arabic)
         
-        # 处理"半"（30分钟）
+        # 第六步：处理"半"（30分钟）
+        text = text.replace("半", "30")
+        
+        return text
+        # 必须在处理"X十"之前
+        for tens in range(2, 10):
+            tens_char = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'][tens]
+            for ones in range(1, 10):
+                ones_char = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'][ones]
+                # 例如："四十五" -> "45"
+                text = text.replace(f"{tens_char}十{ones_char}", str(tens * 10 + ones))
+        
+        # 第三步：处理"X十"（20, 30, ...90）
+        for i in range(2, 10):
+            chinese_num = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'][i]
+            text = text.replace(f"{chinese_num}十", str(i * 10))
+        
+        # 第四步：处理单独的"十"（10）
+        text = text.replace("十", "10")
+        
+        # 第五步：处理单个数字
+        chinese_to_arabic = {
+            '零': '0', '一': '1', '二': '2', '三': '3', '四': '4',
+            '五': '5', '六': '6', '七': '7', '八': '8', '九': '9'
+        }
+        
+        for chinese, arabic in chinese_to_arabic.items():
+            text = text.replace(chinese, arabic)
+        
+        # 第六步：处理"半"（30分钟）
         text = text.replace("半", "30")
         
         return text
@@ -653,7 +776,11 @@ class ReminderPlugin(Star):
                         minute = int(time_match.group(2) or "0")
                         
                         # 处理12小时制转换
-                        if "下午" in time_desc or "晚上" in time_desc:
+                        if "中午" in time_desc:
+                            # 中午12点保持不变，但如果是1-11点则为下午
+                            if hour < 12 and hour != 0:
+                                hour += 12
+                        elif "下午" in time_desc or "晚上" in time_desc:
                             if hour < 12:
                                 hour += 12
                         elif "早上" in time_desc or "早晨" in time_desc or "上午" in time_desc:
@@ -682,7 +809,7 @@ class ReminderPlugin(Star):
                         schedule_info["recurrence_value"] = ""
                         schedule_info["recurrence_time"] = recurrence_time
                     elif recurrence_type == "weekly":
-                        # 解析星期几
+                        # 解析星期几（支持多个，如"一、二、三、四、五"表示工作日）
                         weekday_map = {
                             "一": "1", "1": "1", "周一": "1", "星期一": "1",
                             "二": "2", "2": "2", "周二": "2", "星期二": "2",
@@ -692,9 +819,35 @@ class ReminderPlugin(Star):
                             "六": "6", "6": "6", "周六": "6", "星期六": "6",
                             "日": "7", "天": "7", "7": "7", "周日": "7", "星期日": "7",
                         }
-                        schedule_info["recurrence"] = "weekly"
-                        schedule_info["recurrence_value"] = weekday_map.get(recurrence_detail, "1")
-                        schedule_info["recurrence_time"] = recurrence_time
+                        
+                        # 检查是否包含多个星期（用顿号、逗号或"和"分隔）
+                        if any(sep in recurrence_detail for sep in ['、', '，', ',', '和', '及']):
+                            # 解析多个星期值
+                            import re
+                            # 分割字符串，支持、，, 和 及等分隔符
+                            weekdays = re.split(r'[、，,和及]+', recurrence_detail)
+                            weekday_values = []
+                            for day in weekdays:
+                                day = day.strip()
+                                if day in weekday_map:
+                                    weekday_values.append(weekday_map[day])
+                            
+                            if len(weekday_values) > 1:
+                                # 多个星期值，标记为需要创建多个日程
+                                schedule_info["recurrence"] = "weekly_multiple"
+                                schedule_info["recurrence_value"] = ",".join(weekday_values)
+                                schedule_info["recurrence_time"] = recurrence_time
+                                logger.info(f"[提取信息] 检测到多星期循环: {weekday_values}")
+                            else:
+                                # 只解析到一个有效值
+                                schedule_info["recurrence"] = "weekly"
+                                schedule_info["recurrence_value"] = weekday_values[0] if weekday_values else "1"
+                                schedule_info["recurrence_time"] = recurrence_time
+                        else:
+                            # 单个星期值
+                            schedule_info["recurrence"] = "weekly"
+                            schedule_info["recurrence_value"] = weekday_map.get(recurrence_detail, "1")
+                            schedule_info["recurrence_time"] = recurrence_time
                     elif recurrence_type == "monthly":
                         schedule_info["recurrence"] = "monthly"
                         schedule_info["recurrence_value"] = recurrence_detail
